@@ -1,0 +1,109 @@
+name: CollabIdeaBoard
+version: 1
+description: >
+  Planning workspace fixture for GraphDocument v2 (history mode and tags).
+  Property constraints and derived fields land in later collabnode PRs.
+config:
+  schemaId: collab-idea-board
+  idStrategy: uuid
+  display:
+    title: Idea Board
+  changeTracking:
+    enabled: true
+    mode: history
+    historyLimit: 10000
+  tags:
+    enabled: true
+nodes:
+  Workspace:
+    identity:
+      from: [slug]
+    properties:
+      slug:
+        type: string
+        required: true
+      title:
+        type: string
+        required: true
+      purpose:
+        type: string
+      status:
+        type: enum
+        values: [active, archived]
+        default: active
+  Feature:
+    properties:
+      title:
+        type: string
+        required: true
+      description:
+        type: string
+      status:
+        type: enum
+        values: [later, now, done, dropped]
+        default: now
+      complexity:
+        type: number
+      uncertainty:
+        type: number
+  Task:
+    properties:
+      title:
+        type: string
+        required: true
+      status:
+        type: enum
+        values: [later, now, done, dropped]
+        default: now
+      complexity:
+        type: number
+  Chunk:
+    properties:
+      text:
+        type: string
+        required: true
+      preview:
+        type: string
+        required: true
+      ordinal:
+        type: number
+        required: true
+  Message:
+    properties:
+      body:
+        type: string
+        required: true
+      role:
+        type: enum
+        values: [user, agent, system]
+        required: true
+      authorId:
+        type: string
+        required: true
+  Person:
+    identity:
+      from: [actorId]
+    properties:
+      actorId:
+        type: string
+        required: true
+      name:
+        type: string
+        required: true
+      kind:
+        type: enum
+        values: [human, agent]
+        default: human
+edges:
+  PART_OF:
+    from: [Feature, Task, Chunk]
+    to: [Feature, Task]
+    directed: true
+  INFORMS:
+    from: [Chunk, Message]
+    to: [Feature, Task]
+    directed: true
+  ASSIGNED_TO:
+    from: [Task, Feature]
+    to: [Person]
+    directed: true

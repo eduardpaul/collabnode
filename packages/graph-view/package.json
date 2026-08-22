@@ -1,0 +1,60 @@
+{
+  "name": "@collabnode/graph-view",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Drop-in <collab-graph> web component for collabnode, rendered with vis-network.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eduardpaul/collabnode.git",
+    "directory": "packages/graph-view"
+  },
+  "homepage": "https://github.com/eduardpaul/collabnode/tree/main/packages/graph-view#readme",
+  "bugs": {
+    "url": "https://github.com/eduardpaul/collabnode/issues"
+  },
+  "keywords": [
+    "collabnode",
+    "graph-visualization",
+    "web-components",
+    "vis-network",
+    "crdt",
+    "collaboration"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "sideEffects": [
+    "./dist/index.js"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@collabnode/graph": "workspace:*",
+    "@collabnode/runtime": "workspace:*",
+    "@collabnode/schema": "workspace:*",
+    "@collabnode/web": "workspace:*",
+    "vis-network": "^10.1.2"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "name": "@collabnode/web",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browser collab client: join a collabnode graph as a CRDT peer without importing Fluid or Loro.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eduardpaul/collabnode.git",
+    "directory": "packages/web"
+  },
+  "homepage": "https://github.com/eduardpaul/collabnode/tree/main/packages/web#readme",
+  "bugs": {
+    "url": "https://github.com/eduardpaul/collabnode/issues"
+  },
+  "keywords": [
+    "collabnode",
+    "browser",
+    "crdt",
+    "collaboration",
+    "web-components"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./change-feed": {
+      "types": "./dist/change-feed.d.ts",
+      "import": "./dist/change-feed.js"
+    },
+    "./html": {
+      "types": "./dist/html.d.ts",
+      "import": "./dist/html.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "sideEffects": [
+    "./dist/change-feed.js"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@collabnode/collab": "workspace:*",
+    "@collabnode/fluid": "workspace:*",
+    "@collabnode/hocuspocus": "workspace:*",
+    "@collabnode/graph": "workspace:*",
+    "@collabnode/runtime": "workspace:*",
+    "@collabnode/schema": "workspace:*",
+    "fluid-framework": "^2.40.0"
+  },
+  "peerDependencies": {
+    "@fluidframework/azure-client": "^2.40.0"
+  },
+  "peerDependenciesMeta": {
+    "@fluidframework/azure-client": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "name": "@collabnode/bench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Performance harness for collabnode: writes/s, concurrency, replication lag, snapshot, join.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eduardpaul/collabnode.git",
+    "directory": "packages/bench"
+  },
+  "homepage": "https://github.com/eduardpaul/collabnode/tree/main/packages/bench#readme",
+  "bugs": {
+    "url": "https://github.com/eduardpaul/collabnode/issues"
+  },
+  "bin": {
+    "collabnode-bench": "./dist/main.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/main.d.ts",
+      "import": "./dist/main.js"
+    }
+  },
+  "files": [
+    "dist",
+    "schema.yaml"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "collabnode": "workspace:*"
+  },
+  "peerDependencies": {
+    "@ladybugdb/core": ">=0.11.0"
+  },
+  "peerDependenciesMeta": {
+    "@ladybugdb/core": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@ladybugdb/core": "^0.19.1",
+    "@types/node": "^22.13.10",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

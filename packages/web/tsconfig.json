@@ -1,0 +1,38 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "lib": [
+      "ES2023",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "skipLibCheck": true,
+    "types": []
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../schema"
+    },
+    {
+      "path": "../graph"
+    },
+    {
+      "path": "../collab"
+    },
+    {
+      "path": "../runtime"
+    },
+    {
+      "path": "../fluid"
+    },
+    {
+      "path": "../hocuspocus"
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "name": "@collabnode/mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@collabnode/hub": "workspace:*",
+    "@collabnode/runtime": "workspace:*",
+    "@collabnode/schema": "workspace:*",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.4.3"
+  },
+
+  "devDependencies": {
+    "@collabnode/collab": "workspace:*",
+    "@collabnode/graph": "workspace:*",
+    "@types/node": "^22.13.10",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  },
+  "license": "MIT",
+  "description": "Schema-driven MCP tools, prompts, and resources.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eduardpaul/collabnode.git",
+    "directory": "packages/mcp"
+  },
+  "homepage": "https://github.com/eduardpaul/collabnode/tree/main/packages/mcp#readme",
+  "bugs": {
+    "url": "https://github.com/eduardpaul/collabnode/issues"
+  },
+  "keywords": [
+    "collabnode",
+    "mcp",
+    "model-context-protocol",
+    "graph",
+    "ai-agents"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

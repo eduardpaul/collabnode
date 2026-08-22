@@ -1,0 +1,29 @@
+name: BenchGraph
+version: 1
+description: Minimal graph for collabnode performance runs
+config:
+  schemaId: bench
+  idStrategy: uuid
+  display:
+    title: Bench
+  changeTracking:
+    enabled: true
+    mode: last-write
+nodes:
+  Task:
+    description: Work item used as the write payload
+    properties:
+      title:
+        type: string
+        required: true
+      status:
+        type: enum
+        values: [todo, doing, done]
+        default: todo
+    ui:
+      label: "{title}"
+edges:
+  BLOCKS:
+    from: [Task]
+    to: [Task]
+    directed: true

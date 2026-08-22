@@ -1,0 +1,54 @@
+{
+  "name": "@collabnode/collab",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@collabnode/graph": "workspace:*",
+    "@collabnode/schema": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  },
+  "license": "MIT",
+  "description": "Backend-agnostic collaborative graph interface and in-memory backend.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eduardpaul/collabnode.git",
+    "directory": "packages/collab"
+  },
+  "homepage": "https://github.com/eduardpaul/collabnode/tree/main/packages/collab#readme",
+  "bugs": {
+    "url": "https://github.com/eduardpaul/collabnode/issues"
+  },
+  "keywords": [
+    "collabnode",
+    "crdt",
+    "collaboration",
+    "backend",
+    "graph"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

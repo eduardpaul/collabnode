@@ -1,0 +1,63 @@
+{
+  "name": "@collabnode/azure",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@collabnode/fluid": "workspace:*",
+    "fluid-framework": "^2.40.0"
+  },
+  "peerDependencies": {
+    "@fluidframework/azure-client": "^2.40.0",
+    "fluid-framework": "^2.40.0"
+  },
+  "peerDependenciesMeta": {
+    "@fluidframework/azure-client": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  },
+  "license": "MIT",
+  "description": "Azure Fluid Relay adapter for collabnode.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eduardpaul/collabnode.git",
+    "directory": "packages/azure"
+  },
+  "homepage": "https://github.com/eduardpaul/collabnode/tree/main/packages/azure#readme",
+  "bugs": {
+    "url": "https://github.com/eduardpaul/collabnode/issues"
+  },
+  "keywords": [
+    "collabnode",
+    "azure",
+    "fluid-relay",
+    "fluid-framework",
+    "crdt"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

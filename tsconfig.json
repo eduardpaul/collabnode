@@ -1,0 +1,56 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "packages/schema"
+    },
+    {
+      "path": "packages/graph"
+    },
+    {
+      "path": "packages/collab"
+    },
+    {
+      "path": "packages/ladybug"
+    },
+    {
+      "path": "packages/embeddings"
+    },
+    {
+      "path": "packages/age"
+    },
+    {
+      "path": "packages/fluid"
+    },
+    {
+      "path": "packages/hocuspocus"
+    },
+    {
+      "path": "packages/azure"
+    },
+    {
+      "path": "packages/runtime"
+    },
+    {
+      "path": "packages/hub"
+    },
+    {
+      "path": "packages/mcp"
+    },
+    {
+      "path": "packages/node"
+    },
+    {
+      "path": "packages/cli"
+    },
+    {
+      "path": "packages/web"
+    },
+    {
+      "path": "packages/graph-view"
+    },
+    {
+      "path": "packages/bench"
+    }
+  ]
+}

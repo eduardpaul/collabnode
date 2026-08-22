@@ -1,0 +1,40 @@
+{
+  "name": "collabnode",
+  "private": true,
+  "type": "module",
+  "description": "Collaborative graph runtime for Node.js: YAML schema, pluggable CRDT backend, graph projection.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eduardpaul/collabnode.git"
+  },
+  "homepage": "https://github.com/eduardpaul/collabnode#readme",
+  "bugs": {
+    "url": "https://github.com/eduardpaul/collabnode/issues"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "build": "tsc -b",
+    "test": "pnpm -r --sort --workspace-concurrency=2 test",
+    "typecheck": "tsc -b --pretty false",
+    "collabnode": "node packages/cli/dist/main.js",
+    "bench": "node packages/bench/dist/main.js",
+    "publish:check": "pnpm -r --filter \"./packages/**\" --filter \"!@collabnode/bench\" exec npm pack --dry-run",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "eslint": "^10.9.0",
+    "eslint-plugin-sonarjs": "^4.2.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.67.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "adm-zip": ">=0.6.0",
+      "sharp": ">=0.35.0"
+    }
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,272 @@
+type: voice-board
+version: 1
+description:
+  en: Dictate notes, create tasks, and collaborate by voice and live text.
+  es: Dicta notas, crea tareas y colabora por voz y texto en vivo.
+
+schema:
+  name: VoiceBoard
+  version: 1
+  config:
+    schemaId: voice-board
+    idStrategy: uuid
+    display:
+      title:
+        en: Voice Board (Notes & Tasks)
+        es: Tablero de Voz (Notas y Tareas)
+    changeTracking:
+      enabled: true
+      mode: history
+  nodes:
+    Note:
+      description:
+        en: A collaborative markdown note, usually dictated out loud
+        es: Una nota markdown colaborativa, normalmente dictada en voz alta
+      identity:
+        from: [title]
+      properties:
+        title:
+          type: string
+          required: true
+          search:
+            boost: 6
+          vector: true
+        body:
+          type: text
+          required: true
+          description:
+            en: Markdown source
+            es: Código fuente markdown
+          search: true
+          vector: true
+      ui:
+        label: "{title}"
+        icon: mic
+        color: "#5eead4"
+      guidelines:
+        en:
+          - Titles are short
+          - Always pass body as the full markdown in upsert_node_Note. Spoken text is not stored.
+          - Update the existing note when the title already exists; do not spawn duplicates
+          - Dictation is messy — drop filler words, but keep the speaker's own wording
+        es:
+          - Los títulos son cortos
+          - Pasa siempre body como el markdown completo en upsert_node_Note. El texto hablado no se almacena.
+          - Actualiza la nota existente cuando el título ya existe; no crees duplicados
+          - "El dictado es desordenado: elimina las muletillas, pero conserva las palabras del hablante"
+    Task:
+      description:
+        en: An actionable task or work item with status and priority
+        es: Una tarea accionable o elemento de trabajo con estado y prioridad
+      identity:
+        from: [title]
+      properties:
+        title:
+          type: string
+          required: true
+          search:
+            boost: 6
+          vector: true
+        status:
+          type: enum
+          values: [todo, doing, done]
+          default: todo
+          required: true
+          description:
+            en: "Workflow state: todo, doing, or done"
+            es: "Estado del flujo de trabajo: todo (pendiente), doing (en curso) o done (hecha)"
+        priority:
+          type: enum
+          values: [low, medium, high]
+          default: medium
+          description:
+            en: "How urgent the task is: low, medium, or high"
+            es: "Cuán urgente es la tarea: low (baja), medium (media) o high (alta)"
+        description:
+          type: text
+          search: true
+          description:
+            en: Longer notes about what the task involves
+            es: Notas más extensas sobre lo que implica la tarea
+      ui:
+        label: "{title}"
+        icon: check-square
+        color: "#f59e0b"
+      guidelines:
+        en:
+          - Titles are concise action items starting with an imperative verb
+          - Update status to 'done' when completed
+        es:
+          - Los títulos son acciones concisas que empiezan con un verbo en imperativo
+          - Cambia status a 'done' cuando la tarea esté completada
+    Person:
+      description:
+        en: Someone who dictates notes or gets tasks assigned to them
+        es: Alguien que dicta notas o a quien se le asignan tareas
+      identity:
+        from: [name]
+      properties:
+        name:
+          type: string
+          required: true
+          search:
+            boost: 6
+      ui:
+        label: "{name}"
+        color: "#c084fc"
+      guidelines:
+        en:
+          - Prefer one Person node per human name
+          - Link AUTHORED to the notes they dictated and ASSIGNED_TO to their tasks
+        es:
+          - Usa un único nodo Person por cada nombre de persona
+          - Enlaza AUTHORED a las notas que dictó y ASSIGNED_TO a sus tareas
+  edges:
+    AUTHORED:
+      description:
+        en: The person who dictated or wrote this note
+        es: La persona que dictó o escribió esta nota
+      from: [Person]
+      to: [Note]
+      directed: true
+      ui:
+        label:
+          en: authored
+          es: escribió
+    ASSIGNED_TO:
+      description:
+        en: The person responsible for finishing this task
+        es: La persona responsable de terminar esta tarea
+      from: [Task]
+      to: [Person]
+      directed: true
+      ui:
+        label:
+          en: assigned to
+          es: asignada a
+    PRODUCES_TASK:
+      description:
+        en: The note this task came out of
+        es: La nota de la que salió esta tarea
+      from: [Note]
+      to: [Task]
+      directed: true
+      ui:
+        label:
+          en: action item
+          es: acción pendiente
+
+params:
+  author:
+    type: string
+    default: "Ada"
+    description:
+      en: Name of the person the seeded notes and tasks belong to
+      es: Nombre de la persona a la que pertenecen las notas y tareas iniciales
+
+template:
+  nodes:
+    - type: Person
+      as: author
+      properties:
+        name: "{author}"
+    - type: Note
+      as: standup_note
+      properties:
+        title: "Standup"
+        body: "## Yesterday\n\n- shipped the WebRTC handshake\n"
+    - type: Note
+      as: headcount_note
+      properties:
+        title: "Q3 headcount"
+        body: "## Open roles\n\n- one backend engineer\n- interview loop stays at four rounds\n"
+    - type: Task
+      as: task_webrtc
+      properties:
+        title: "Ship WebRTC reconnection"
+        status: done
+        priority: high
+    - type: Task
+      as: task_interview
+      properties:
+        title: "Interview backend candidate"
+        status: doing
+        priority: high
+    - type: Task
+      as: task_docs
+      properties:
+        title: "Update MCP documentation"
+        status: todo
+        priority: medium
+  edges:
+    - type: AUTHORED
+      from: author
+      to: standup_note
+    - type: AUTHORED
+      from: author
+      to: headcount_note
+    - type: ASSIGNED_TO
+      from: task_webrtc
+      to: author
+    - type: ASSIGNED_TO
+      from: task_interview
+      to: author
+    - type: ASSIGNED_TO
+      from: task_docs
+      to: author
+    - type: PRODUCES_TASK
+      from: headcount_note
+      to: task_interview
+
+lifecycle:
+  idleTimeout: 30m
+  maxDuration: 24h
+
+tools:
+  expose:
+    - graph_describe
+    - graph_list
+    - graph_get
+    - graph_search
+    - graph_similar
+    - upsert_node_Note
+    - upsert_node_Task
+    - upsert_node_Person
+    - delete_node
+    - upsert_edge_AUTHORED
+    - upsert_edge_ASSIGNED_TO
+    - upsert_edge_PRODUCES_TASK
+
+  named:
+    dictate_note:
+      description:
+        en: Dictate a note and attribute it to an author in one step
+        es: Dicta una nota y atribúyela a un autor en un solo paso
+      creates: Note
+      into: AUTHORED
+    add_task:
+      description:
+        en: Create a task with title, status, priority, and assign it to a person
+        es: Crea una tarea con título, estado y prioridad, y asígnala a una persona
+      creates: Task
+      into: ASSIGNED_TO
+  agents:
+    - role: voice-live
+      actorId: echo
+      description:
+        en: Voice-live assistant listening on WebRTC audio track
+        es: Asistente de voz en vivo escuchando en la pista de audio WebRTC
+      systemPrompt:
+        en: You are the Voice-Live assistant. You help the user dictate notes, create and update tasks, assign work, and search the board by voice.
+        es: Eres el asistente de Voz en Vivo. Ayudas al usuario a dictar notas, crear y actualizar tareas, asignar trabajo y buscar en el tablero por voz. Responde siempre en español.
+      tools:
+        - dictate_note
+        - add_task
+        - graph_search
+        - graph_get
+        - upsert_node_Task
+
+projection: memory
+retention:
+  onEnd: keep
+  artifact: required

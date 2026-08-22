@@ -1,0 +1,29 @@
+{
+  "name": "@collabnode/example-voice-board",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-strip-types src/server.ts",
+    "test": "node --experimental-strip-types src/voice-tools.test.ts && node --experimental-strip-types src/voice-search.test.ts && node --experimental-strip-types src/voice-workspace.test.ts && node --experimental-strip-types src/boards.test.ts && node --experimental-strip-types src/voice-i18n.test.ts && node --experimental-strip-types src/live-connect.test.ts"
+  },
+
+
+  "dependencies": {
+    "@codemirror/commands": "^6.7.1",
+    "@codemirror/lang-markdown": "^6.3.2",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.36.4",
+    "@collabnode/graph-view": "workspace:*",
+    "@collabnode/web": "workspace:*",
+    "codemirror": "^6.0.1",
+    "collabnode": "workspace:*",
+    "vite": "^8.2.2",
+    "ws": "^8.18.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "@types/ws": "^8.5.14"
+  }
+}
