@@ -1,0 +1,279 @@
+type: c4-architecture
+version: 1
+description:
+  en: C4 software architecture model with Systems, Containers, Components, and Users.
+  es: Modelo de arquitectura de software C4 con Sistemas, Contenedores, Componentes y Usuarios.
+
+schema:
+  name: C4ArchitectureGraph
+  version: 1
+  config:
+    schemaId: c4-architecture
+    idStrategy: uuid
+    display:
+      title:
+        en: C4 Architecture Model
+        es: Modelo de Arquitectura C4
+    changeTracking:
+      enabled: true
+      mode: history
+  nodes:
+    Person:
+      description:
+        en: A human user, actor, or persona interacting with software systems
+        es: Un usuario humano, actor o persona que interactúa con los sistemas de software
+      identity:
+        from: [name]
+      properties:
+        name:
+          type: string
+          required: true
+          search:
+            boost: 6
+        role:
+          type: string
+          description:
+            en: Role description or title
+            es: Descripción del rol o cargo
+        external:
+          type: boolean
+          default: false
+      ui:
+        label: "{name}"
+        icon: user
+        color: "#0891b2"
+      guidelines:
+        en:
+          - Represent distinct human user personas or external actors
+        es:
+          - Representa personas usuarias distintas o actores externos
+    SoftwareSystem:
+      description:
+        en: Top-level software system that delivers value to users
+        es: Sistema de software de alto nivel que aporta valor a los usuarios
+      identity:
+        from: [name]
+      properties:
+        name:
+          type: string
+          required: true
+          search:
+            boost: 6
+          vector: true
+        description:
+          type: string
+          required: true
+          search: true
+        external:
+          type: boolean
+          default: false
+      ui:
+        label: "{name}"
+        icon: box
+        color: "#1d4ed8"
+      guidelines:
+        en:
+          - Represents a standalone software system in the landscape
+        es:
+          - Representa un sistema de software autónomo dentro del panorama
+    Container:
+      description:
+        en: An independently deployable/runnable unit (web app, API, database, mobile app)
+        es: Una unidad desplegable/ejecutable de forma independiente (app web, API, base de datos, app móvil)
+      identity:
+        from: [name]
+      properties:
+        name:
+          type: string
+          required: true
+          search:
+            boost: 6
+          vector: true
+        technology:
+          type: string
+          required: true
+          search: true
+        description:
+          type: string
+          required: true
+          search: true
+        kind:
+          type: enum
+          values: [single_page_app, web_app, mobile_app, api, service, database, queue]
+          default: service
+      ui:
+        label: "{name}"
+        icon: layers
+        color: "#4338ca"
+      guidelines:
+        en:
+          - A container is an application or data store executing within a SoftwareSystem
+        es:
+          - Un contenedor es una aplicación o almacén de datos que se ejecuta dentro de un SoftwareSystem
+    Component:
+      description:
+        en: A functional module, controller, or service inside a container
+        es: Un módulo funcional, controlador o servicio dentro de un contenedor
+      identity:
+        from: [name]
+      properties:
+        name:
+          type: string
+          required: true
+          search:
+            boost: 6
+        technology:
+          type: string
+          required: true
+        description:
+          type: string
+          required: true
+          search: true
+      ui:
+        label: "{name}"
+        icon: code
+        color: "#7c3aed"
+      guidelines:
+        en:
+          - Modular building block residing inside a container
+        es:
+          - Bloque de construcción modular que reside dentro de un contenedor
+  edges:
+    USES:
+      description:
+        en: One element calls, reads from, or depends on another
+        es: Un elemento llama, lee o depende de otro
+      from: [Person, SoftwareSystem, Container, Component]
+      to: [SoftwareSystem, Container, Component]
+      directed: true
+      properties:
+        description:
+          type: string
+        technology:
+          type: string
+      ui:
+        label:
+          en: uses
+          es: usa
+    CONTAINS:
+      description:
+        en: The parent element this one is nested inside
+        es: El elemento padre dentro del cual está anidado este
+      from: [SoftwareSystem, Container]
+      to: [Container, Component]
+      directed: true
+      ui:
+        label:
+          en: contains
+          es: contiene
+    DELIVERS:
+      description:
+        en: The people this system delivers value to
+        es: Las personas a las que este sistema aporta valor
+      from: [SoftwareSystem]
+      to: [Person]
+      directed: true
+      ui:
+        label:
+          en: delivers value to
+          es: aporta valor a
+
+params:
+  systemName:
+    type: string
+    default: "My Software System"
+    description:
+      en: Name of the software system at the centre of the model
+      es: Nombre del sistema de software en el centro del modelo
+  systemDescription:
+    type: string
+    default: "Core software system delivering capabilities."
+    description:
+      en: One-line summary of what the system does
+      es: Resumen de una línea sobre lo que hace el sistema
+  primaryUser:
+    type: string
+    default: "Customer"
+    description:
+      en: Name of the main persona using the system
+      es: Nombre de la persona principal que usa el sistema
+  userRole:
+    type: string
+    default: "Uses the system to perform business workflows"
+    description:
+      en: What the primary persona does with the system
+      es: Qué hace la persona principal con el sistema
+
+template:
+  nodes:
+    - type: Person
+      as: primary_user
+      properties:
+        name: "{primaryUser}"
+        role: "{userRole}"
+        external: false
+    - type: SoftwareSystem
+      as: core_system
+      properties:
+        name: "{systemName}"
+        description: "{systemDescription}"
+        external: false
+  edges:
+    - type: USES
+      from: primary_user
+      to: core_system
+      properties:
+        description: "Uses"
+        technology: "HTTPS"
+
+lifecycle:
+  idleTimeout: 30m
+  maxDuration: 24h
+
+tools:
+  expose:
+    - graph_describe
+    - graph_list
+    - graph_get
+    - graph_search
+    - graph_neighbors
+    - upsert_node_SoftwareSystem
+    - upsert_node_Container
+    - upsert_node_Component
+    - upsert_node_Person
+    - upsert_edge_USES
+    - upsert_edge_CONTAINS
+    - upsert_edge_DELIVERS
+  named:
+    add_container:
+      description:
+        en: Add a container (web app, API, database) and nest it inside a SoftwareSystem
+        es: Añade un contenedor (app web, API, base de datos) y anídalo dentro de un SoftwareSystem
+      creates: Container
+      into: CONTAINS
+    add_component:
+      description:
+        en: Add a component (controller, service, module) and nest it inside a Container
+        es: Añade un componente (controlador, servicio, módulo) y anídalo dentro de un Container
+      creates: Component
+      into: CONTAINS
+  agents:
+    - role: c4-architect
+      actorId: architect-bot
+      description:
+        en: C4 Architecture Design Assistant
+        es: Asistente de diseño de arquitectura C4
+      systemPrompt:
+        en: You are the C4 Software Architect assistant. Help design software systems, containers, and components, connecting them with USES and CONTAINS edges.
+        es: Eres el asistente de Arquitectura de Software C4. Ayuda a diseñar sistemas de software, contenedores y componentes, conectándolos con aristas USES y CONTAINS. Responde siempre en español.
+      tools:
+        - add_container
+        - add_component
+        - graph_search
+        - graph_get
+        - graph_neighbors
+
+projection: memory
+retention:
+  onEnd: keep
+  artifact: required

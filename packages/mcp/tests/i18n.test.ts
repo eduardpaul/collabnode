@@ -425,7 +425,7 @@ describe("i18n HTTP and Hub MCP handlers", () => {
       },
       body: JSON.stringify(initPayload),
     });
-    const resEs = await handler(reqEs);
+    const resEs = await handler.fetch(reqEs);
     expect(resEs.status).toBe(200);
 
     // Request with Accept-Language: es
@@ -438,7 +438,7 @@ describe("i18n HTTP and Hub MCP handlers", () => {
       },
       body: JSON.stringify(initPayload),
     });
-    const resHeader = await handler(reqHeader);
+    const resHeader = await handler.fetch(reqHeader);
     expect(resHeader.status).toBe(200);
 
     await hub.close();

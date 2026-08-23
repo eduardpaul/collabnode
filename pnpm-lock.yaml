@@ -71,6 +71,58 @@ importers:
         specifier: ^8.5.14
         version: 8.18.1
 
+  examples/voice-board-azure:
+    dependencies:
+      '@codemirror/commands':
+        specifier: ^6.7.1
+        version: 6.11.0
+      '@codemirror/lang-markdown':
+        specifier: ^6.3.2
+        version: 6.5.2
+      '@codemirror/state':
+        specifier: ^6.5.2
+        version: 6.7.1
+      '@codemirror/view':
+        specifier: ^6.36.4
+        version: 6.43.9
+      '@collabnode/graph-view':
+        specifier: workspace:*
+        version: link:../../packages/graph-view
+      '@collabnode/redis':
+        specifier: workspace:*
+        version: link:../../packages/redis
+      '@collabnode/web':
+        specifier: workspace:*
+        version: link:../../packages/web
+      '@fluidframework/azure-client':
+        specifier: ^2.116.0
+        version: 2.116.0
+      codemirror:
+        specifier: ^6.0.1
+        version: 6.0.2
+      collabnode:
+        specifier: workspace:*
+        version: link:../../packages/node
+      ioredis:
+        specifier: ^6.0.0
+        version: 6.0.0
+      vite:
+        specifier: ^8.2.2
+        version: 8.2.2(@types/node@25.9.5)(yaml@2.9.0)
+      ws:
+        specifier: ^8.18.0
+        version: 8.21.3
+      zod:
+        specifier: ^4.0.0
+        version: 4.4.3
+    devDependencies:
+      '@huggingface/transformers':
+        specifier: ^4.2.0
+        version: 4.2.0(@types/node@25.9.5)
+      '@types/ws':
+        specifier: ^8.5.14
+        version: 8.18.1
+
   packages/age:
     dependencies:
       '@collabnode/graph':
@@ -420,6 +472,25 @@ importers:
       '@types/node':
         specifier: ^22.13.10
         version: 22.20.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.11(@types/node@22.20.1)(vite@8.2.2(@types/node@22.20.1)(yaml@2.9.0))
+
+  packages/redis:
+    dependencies:
+      '@collabnode/hub':
+        specifier: workspace:*
+        version: link:../hub
+    devDependencies:
+      '@types/node':
+        specifier: ^22.13.10
+        version: 22.20.1
+      ioredis:
+        specifier: ^6.0.0
+        version: 6.0.0
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -952,6 +1023,9 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@ioredis/commands@2.0.0':
+    resolution: {integrity: sha512-vrx0AE/T0h7cRZwfo1M39Cr+ZhZrkf0V8mQN75wucKCxCLD9l/VX6no3gFvrLqD1IlG/1LtzWovqEw3t0Vr9zg==}
+
   '@isaacs/fs-minipass@4.0.1':
     resolution: {integrity: sha512-wgm9Ehl2jpeqP3zw/7mo3kRHFp5MEDhqAdwy1fTGkHAwnkGOVsgpvQhL8B5n1qlb01jV3n/bI0ZfZp5lWA1k4w==}
     engines: {node: '>=18.0.0'}
@@ -1402,6 +1476,10 @@ packages:
     resolution: {integrity: sha512-BSeNnyus75C4//NQ9gQt1/csTXyo/8Sb+afLAkzAptFuMsod9HFokGNudZpi/oQV73hnVK+sR+5PVRMd+Dr7YQ==}
     engines: {node: '>=12'}
 
+  cluster-key-slot@1.1.1:
+    resolution: {integrity: sha512-rwHwUfXL40Chm1r08yrhU3qpUvdVlgkKNeyeGPOxnW8/SyVDvgRaed/Uz54AqWNaTCAThlj6QAs3TZcKI0xDEw==}
+    engines: {node: '>=0.10.0'}
+
   cmake-js@8.0.0:
     resolution: {integrity: sha512-YbUP88RDwCvoQkZhRtGURYm9RIpWdtvZuhT87fKNoLjk8kIFIFeARpKfuZQGdwfH99GZpUmqSfcDrK62X7lTgg==}
     engines: {node: ^20.17.0 || >=22.9.0}
@@ -1475,6 +1553,10 @@ packages:
   delayed-stream@1.0.0:
     resolution: {integrity: sha512-ZySD7Nf91aLB0RxL4KGrKHBXl7Eds1DAmEdcoVawXnLD7SDhpNgtuII2aAkg7a7QS41jxPSZ17p4VdGnMHk3MQ==}
     engines: {node: '>=0.4.0'}
+
+  denque@2.1.0:
+    resolution: {integrity: sha512-HVQE3AAb/pxF8fQAoiqpvg9i3evqug3hoiwakOyZAwJm+6vZehbkYXZ0l4JxS+I3QxM97v5aaRNhj8v5oBhekw==}
+    engines: {node: '>=0.10'}
 
   detect-libc@2.1.2:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
@@ -1756,6 +1838,10 @@ packages:
 
   ini@1.3.8:
     resolution: {integrity: sha512-JV/yugV2uzW5iMRSiZAyDtQd+nxtUnjeLt0acNdw98kKLrvuRVyB80tsREOE7yvGVgalhZ6RNXCmEHkUKBKxew==}
+
+  ioredis@6.0.0:
+    resolution: {integrity: sha512-f+Dtubxfpf6KYFq7WVXJoOLn0bk4TJrMrN9SzeE+jrWrCWj7XX3fA6vkryafhADX+GMymRxgDJDOI33COkJc0w==}
+    engines: {node: '>=20.0.0'}
 
   is-callable@1.2.7:
     resolution: {integrity: sha512-1BC0BVFhS/p0qtw6enp8e+8OD0UrK0oFLztSjNzhcKA3WDuJxxAPXzPuPtKkjEY9UUoEWlX/8fgKeu2S8i9JTA==}
@@ -2128,6 +2214,10 @@ packages:
     resolution: {integrity: sha512-y3bGgqKj3QBdxLbLkomlohkvsA8gdAiUQlSBJnBhfn+BPxg4bc62d8TcBW15wavDfgexCgccckhcZvywyQYPOw==}
     hasBin: true
 
+  redis-errors@1.2.0:
+    resolution: {integrity: sha512-1qny3OExCf0UvUV/5wpYKf2YwPcOqXzkwKKSmKHiE6ZMQs5heeE/c8eXK+PNllPvmjgAbfnsbpkGZWy8cBpn9w==}
+    engines: {node: '>=4'}
+
   refa@0.12.1:
     resolution: {integrity: sha512-J8rn6v4DBb2nnFqkqwy6/NnTYMcgLA+sLr0iIO41qpv0n+ngb7ksag2tMRl0inb1bbO/esUwzW1vbJi7K0sI0g==}
     engines: {node: ^12.0.0 || ^14.0.0 || >=16.0.0}
@@ -2232,6 +2322,9 @@ packages:
 
   stackback@0.0.2:
     resolution: {integrity: sha512-1XMJE5fQo1jGH6Y/7ebnwPOBEkIEnT4QF32d5R1+VXdXveM0IBMJt8zfaxX1P3QhVwrYe+576+jkANtSS2mBbw==}
+
+  standard-as-callback@2.1.0:
+    resolution: {integrity: sha512-qoRRSyROncaz1z0mvYqIE4lCd9p2R90i6GxW3uZv5ucSu8tU7B5HXUP1gG8pVZsYNVaXjk8ClXHPttLyxAL48A==}
 
   std-env@4.2.0:
     resolution: {integrity: sha512-oCUKSupKTHX53EyjDtuZQ64pjLJ6yYCtpmEw0goYxtjG9KpbRe8KAsl2tBUGU9DyMcJ0RwJ8GqJAFzMXcXW1Rw==}
@@ -3383,6 +3476,8 @@ snapshots:
   '@img/sharp-win32-x64@0.35.3':
     optional: true
 
+  '@ioredis/commands@2.0.0': {}
+
   '@isaacs/fs-minipass@4.0.1':
     dependencies:
       minipass: 7.1.3
@@ -3839,6 +3934,8 @@ snapshots:
       strip-ansi: 6.0.1
       wrap-ansi: 7.0.0
 
+  cluster-key-slot@1.1.1: {}
+
   cmake-js@8.0.0:
     dependencies:
       debug: 4.4.3
@@ -3913,6 +4010,8 @@ snapshots:
       object-keys: 1.1.1
 
   delayed-stream@1.0.0: {}
+
+  denque@2.1.0: {}
 
   detect-libc@2.1.2: {}
 
@@ -4222,6 +4321,17 @@ snapshots:
 
   ini@1.3.8: {}
 
+  ioredis@6.0.0:
+    dependencies:
+      '@ioredis/commands': 2.0.0
+      cluster-key-slot: 1.1.1
+      debug: 4.4.3
+      denque: 2.1.0
+      redis-errors: 1.2.0
+      standard-as-callback: 2.1.0
+    transitivePeerDependencies:
+      - supports-color
+
   is-callable@1.2.7: {}
 
   is-extglob@2.1.1: {}
@@ -4529,6 +4639,8 @@ snapshots:
       minimist: 1.2.8
       strip-json-comments: 2.0.1
 
+  redis-errors@1.2.0: {}
+
   refa@0.12.1:
     dependencies:
       '@eslint-community/regexpp': 4.12.2
@@ -4708,6 +4820,8 @@ snapshots:
   sprintf-js@1.1.3: {}
 
   stackback@0.0.2: {}
+
+  standard-as-callback@2.1.0: {}
 
   std-env@4.2.0: {}
 

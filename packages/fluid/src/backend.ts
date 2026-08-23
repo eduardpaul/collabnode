@@ -99,6 +99,36 @@ async function waitConnected(container: IFluidContainer): Promise<void> {
   });
 }
 
+/**
+ * Waits for pending ops to reach the service before the container is disposed.
+ *
+ * `dispose()` drops whatever has not been acknowledged yet. Against Tinylicious
+ * on localhost that window is invisible; against a hosted relay it is a network
+ * round trip, which is long enough for a replica shutting down to lose the last
+ * write it accepted.
+ */
+async function waitSaved(container: IFluidContainer, timeoutMs = 5_000): Promise<void> {
+  const emitter = container as IFluidContainer & {
+    isDirty?: boolean;
+    once?: (event: "saved", listener: () => void) => void;
+    off?: (event: "saved", listener: () => void) => void;
+  };
+  if (emitter.isDirty !== true || typeof emitter.once !== "function") {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    // A disconnected container never fires "saved". The timeout is what keeps
+    // shutdown bounded instead of hanging on a relay that is not answering.
+    const timer = setTimeout(finish, timeoutMs);
+    function finish(): void {
+      clearTimeout(timer);
+      emitter.off?.("saved", finish);
+      resolve();
+    }
+    emitter.once?.("saved", finish);
+  });
+}
+
 async function waitUntilViewable(view: {
   compatibility: { canView: boolean; canInitialize: boolean };
 }): Promise<void> {
@@ -211,6 +241,7 @@ export class FluidCollabBackend implements CollabBackend {
         throw unsupported(this.kind, "presence");
       },
       close: async () => {
+        await waitSaved(container);
         container.dispose();
       },
     };

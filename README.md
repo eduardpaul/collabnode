@@ -142,6 +142,7 @@ Host apps should depend on **`collabnode`**. Scoped packages are for advanced wi
 | `@collabnode/embeddings` | Local text embeddings for semantic search (`@huggingface/transformers` optional peer) |
 | `@collabnode/runtime` | `CollabSession` |
 | `@collabnode/hub` | `Hub`: workspace types, idempotent open, lifecycle/reaper, registry, artifacts |
+| `@collabnode/redis` | Redis `WorkspaceRegistry`: leases, records, and reaping shared across replicas (`ioredis` optional peer) |
 | `@collabnode/mcp` | Schema-driven MCP server |
 | `@collabnode/cli` | `validate` / `ddl` / `serve` / `mcp` |
 | `@collabnode/bench` | Private: hot-path metrics + users/limits ladders across Fluid/Hocuspocus × Ladybug/AGE |
@@ -161,7 +162,7 @@ const node = await init({
   collab: { kind: "fluid", storageDir: "data/tinylicious" }, // or azure / { kind: "hocuspocus" }
 });
 // GET  /api/collab/join  → webJoinInfo(node)
-// POST /api/collab/token → createFluidTokenHandler({ tenantKey, user })  // Azure only
+// POST /api/collab/token → createFluidTokenHandler({ tenantKey, user, authorize })  // Azure only
 
 // Browser
 const join = await (await fetch("/api/collab/join")).json();
@@ -176,6 +177,22 @@ const client = await connect({
 client.session.onChange((_ops, snapshot) => render(snapshot));
 await client.session.upsertNode({ type: "Task", properties: { title: "Draft Q3 plan" } });
 ```
+
+On Azure, the tenant key is a bearer credential for the whole tenant, so it
+stays on the server and the browser gets a token scoped to one document.
+`authorize` is what makes that scoping mean something — `user()` answers *who is
+asking*, never *what they may open*, and the token is minted for whatever
+`documentId` the request carried:
+
+```ts
+createFluidTokenHandler({
+  tenantKey: process.env.AZURE_FLUID_KEY,
+  user: (request) => sessionUser(request),
+  authorize: ({ user, documentId }) => mayOpen(user, documentId),
+});
+```
+
+See `examples/voice-board-azure` for the whole path, relay to browser.
 
 Drop-in graph UI (any schema) — same `session` as `connect()`:
 
@@ -416,9 +433,25 @@ for everyone else. `hub.close()` closes every live workspace without ending any.
 ### Registry
 
 `memoryRegistry()` is the default, and it is per process — fine for one host,
-wrong for two. Implement `WorkspaceRegistry` (`claim` / `heartbeat` / `release`,
-`get` / `put` / `delete` / `list` / `due`) over Postgres or Redis and the same
-leasing, the same reaper, and the same idempotent `open()` hold across replicas.
+wrong for two. `@collabnode/redis` is the shared one:
+
+```ts
+import { redisRegistry } from "@collabnode/redis";
+
+const hub = await createHub({
+  collab: backend,
+  registry: await redisRegistry({ url: process.env.REDIS_URL }),
+  sweepIntervalMs: 0,   // one replica drives sweep(), not all of them
+});
+```
+
+The lease becomes a `SET NX PX`, so expiry belongs to Redis rather than to a
+timer in a process that may already be gone, and `collabDocId` — the mapping
+from workspace id to the document a backend minted — outlives the replica that
+created it. Any other store works the same way: implement `WorkspaceRegistry`
+(`claim` / `heartbeat` / `release`, `get` / `put` / `delete` / `list` / `due`)
+and the same leasing, the same reaper, and the same idempotent `open()` hold
+across replicas.
 
 ### Projection, per type
 
@@ -463,6 +496,8 @@ const mcp = createHubMcpHandler(hub, {
   actorFrom: (req) => authenticate(req)?.userId,    // stamps meta.updatedBy
   agentRoleFrom: (req) => authenticate(req)?.role,  // trusted role, instead of ?role=
 });
+
+// mcp.fetch(request) → Response; mcp.close() on shutdown
 ```
 
 The surface is generated per request from that workspace's type: `tools.expose`
@@ -547,6 +582,12 @@ A third is a new YAML plus one `hub.define`: its tile, its create form, its voic
 tools, its MCP mount, and its starter graph all follow from the document, and
 neither the server nor the client learns its name. English and Spanish come from
 `en:` / `es:` keys in the same file (`?lang=es`).
+
+`examples/voice-board-azure` is the same application on hosted infrastructure:
+Azure Fluid Relay instead of Tinylicious, a Redis registry instead of the
+in-process one, and per-document tokens from `/api/fluid/token` instead of no
+credentials at all. It is the shortest read on what deploying this actually
+takes.
 
 ## Publishing
 
