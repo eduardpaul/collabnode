@@ -350,3 +350,118 @@ tools:
     expect(types).not.toContain("ANNOTATES");
   });
 });
+
+describe("agent node policy on graph_apply_batch", () => {
+  let seeded: Seeded;
+
+  beforeEach(async () => {
+    seeded = await seed();
+  });
+
+  it("is offered only to a role that may write something", () => {
+    expect(toolsFor(seeded.session, "reviewer").map((tool) => tool.name)).toContain(
+      "graph_apply_batch",
+    );
+    expect(toolsFor(seeded.session, "observer").map((tool) => tool.name)).not.toContain(
+      "graph_apply_batch",
+    );
+  });
+
+  it("refuses a batch write to a read-only type", async () => {
+    const reviewer = toolsFor(seeded.session, "reviewer");
+    const refused = await call(reviewer, "graph_apply_batch", {
+      ops: [{ op: "upsertNode", type: "Decision", properties: { title: "Sneak in" } }],
+    });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0]!.text).toContain("read-only");
+    expect(
+      seeded.session.snapshot().nodes.some((node) => node.properties.title === "Sneak in"),
+    ).toBe(false);
+  });
+
+  it("refuses a batch delete of a read-only node, and of a hidden one", async () => {
+    const reviewer = toolsFor(seeded.session, "reviewer");
+
+    const readOnly = await call(reviewer, "graph_apply_batch", {
+      ops: [{ op: "deleteNode", id: seeded.decision }],
+    });
+    expect(readOnly.isError).toBe(true);
+    expect(readOnly.content[0]!.text).toContain("read-only");
+    expect(seeded.session.snapshot().nodes.some((node) => node.id === seeded.decision)).toBe(true);
+
+    // A hidden node answers as an id that never existed, here as everywhere.
+    const hidden = await call(reviewer, "graph_apply_batch", {
+      ops: [{ op: "deleteNode", id: seeded.note }],
+    });
+    expect(hidden.isError).toBe(true);
+    expect(hidden.content[0]!.text).toBe(`id: unknown id: ${seeded.note}`);
+    expect(seeded.session.snapshot().nodes.some((node) => node.id === seeded.note)).toBe(true);
+  });
+
+  it("refuses a batch edge aimed at a read-only endpoint", async () => {
+    const reviewer = toolsFor(seeded.session, "reviewer");
+    const refused = await call(reviewer, "graph_apply_batch", {
+      ops: [{ op: "upsertEdge", type: "RELATES_TO", from: seeded.incident, to: seeded.decision }],
+    });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0]!.text).toContain("read-only");
+
+    const hiddenEdge = await call(reviewer, "graph_apply_batch", {
+      ops: [{ op: "upsertEdge", type: "ANNOTATES", from: seeded.note, to: seeded.incident }],
+    });
+    expect(hiddenEdge.isError).toBe(true);
+  });
+
+  it("nothing in a refused batch is applied", async () => {
+    const reviewer = toolsFor(seeded.session, "reviewer");
+    const refused = await call(reviewer, "graph_apply_batch", {
+      ops: [
+        { op: "upsertNode", type: "Incident", properties: { title: "Allowed" } },
+        { op: "upsertNode", type: "Decision", properties: { title: "Refused" } },
+      ],
+    });
+    expect(refused.isError).toBe(true);
+    const titles = seeded.session.snapshot().nodes.map((node) => node.properties.title);
+    expect(titles).not.toContain("Allowed");
+    expect(titles).not.toContain("Refused");
+  });
+
+  it("applies a batch a role is allowed to make, refs included", async () => {
+    const reviewer = toolsFor(seeded.session, "reviewer");
+    const applied = await call(reviewer, "graph_apply_batch", {
+      ops: [
+        { op: "upsertNode", type: "Incident", ref: "next", properties: { title: "Follow-up" } },
+        { op: "upsertEdge", type: "RELATES_TO", from: seeded.incident, to: { ref: "next" } },
+      ],
+    });
+    expect(applied.isError).toBeFalsy();
+    const snapshot = seeded.session.snapshot();
+    const created = snapshot.nodes.find((node) => node.properties.title === "Follow-up");
+    expect(created).toBeDefined();
+    expect(
+      snapshot.edges.some((edge) => edge.type === "RELATES_TO" && edge.to === created!.id),
+    ).toBe(true);
+  });
+
+  it("rejects a malformed op instead of passing it through", async () => {
+    const reviewer = toolsFor(seeded.session, "reviewer");
+    const refused = await call(reviewer, "graph_apply_batch", {
+      ops: [{ op: "drop_everything", id: seeded.incident }],
+    });
+    expect(refused.isError).toBe(true);
+  });
+
+  it("withholds graph_diff_since from a concealing role", () => {
+    expect(toolsFor(seeded.session, "triage").map((tool) => tool.name)).toContain(
+      "graph_diff_since",
+    );
+    // The reviewer cannot see PrivateNote, and a diff cannot be filtered after
+    // the fact — same reason graph_query is withheld.
+    expect(toolsFor(seeded.session, "reviewer").map((tool) => tool.name)).not.toContain(
+      "graph_diff_since",
+    );
+    expect(toolsFor(seeded.session, "observer").map((tool) => tool.name)).toContain(
+      "graph_diff_since",
+    );
+  });
+});

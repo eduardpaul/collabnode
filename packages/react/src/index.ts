@@ -5,6 +5,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
   type ReactNode,
@@ -28,6 +29,8 @@ export interface UseCollabResult {
   isLoading: boolean;
   isConnected: boolean;
   error: Error | null;
+  /** Nodes grouped by `type`, so a view does not filter the snapshot itself. */
+  nodesByType: Record<string, GraphNodeRecord[]>;
   upsertNode: (input: UpsertNodeInput, options?: MutationOptions) => Promise<string>;
   deleteNode: (id: string, options?: MutationOptions) => Promise<void>;
   upsertEdge: (input: UpsertEdgeInput, options?: MutationOptions) => Promise<string>;
@@ -39,47 +42,85 @@ const EMPTY_SNAPSHOT: GraphSnapshot = { schemaId: "", schemaHash: "", nodes: [],
 interface SessionStore {
   snapshot: GraphSnapshot;
   listeners: Set<() => void>;
+  subscribe(listener: () => void): () => void;
 }
 
 const sessionStores = new WeakMap<CollabSession, SessionStore>();
 
+/**
+ * One cached snapshot per session, shared by every hook reading it.
+ *
+ * The session subscription is held only while something is listening. A store
+ * that stayed subscribed for the lifetime of the session would keep feeding a
+ * snapshot nobody reads — and would keep the closure, and everything it
+ * captures, alive after the last component unmounted.
+ */
 function getSessionStore(session: CollabSession): SessionStore {
-  let store = sessionStores.get(session);
-  if (!store) {
-    const listeners = new Set<() => void>();
-    store = {
-      snapshot: session.snapshot(),
-      listeners,
-    };
-    session.onChange((_ops, nextSnapshot) => {
-      store!.snapshot = nextSnapshot;
-      for (const listener of Array.from(listeners)) {
-        listener();
-      }
-    });
-    sessionStores.set(session, store);
+  const cached = sessionStores.get(session);
+  if (cached) {
+    return cached;
   }
+  const listeners = new Set<() => void>();
+  let stop: (() => void) | undefined;
+  const store: SessionStore = {
+    snapshot: session.snapshot(),
+    listeners,
+    subscribe(listener) {
+      if (listeners.size === 0) {
+        // Nothing was listening, so the cached snapshot may be behind. Catch it
+        // up before the first read, and again on every change after that.
+        store.snapshot = session.snapshot();
+        stop = session.onChange((_ops, nextSnapshot) => {
+          store.snapshot = nextSnapshot;
+          for (const entry of Array.from(listeners)) {
+            entry();
+          }
+        });
+      }
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) {
+          stop?.();
+          stop = undefined;
+        }
+      };
+    },
+  };
+  sessionStores.set(session, store);
   return store;
 }
 
 /**
  * React hook to connect to a collabnode document in the browser.
+ *
+ * The connection is owned by the hook: unmounting, or pointing it at a
+ * different document, closes the one it opened. A `connect()` whose result is
+ * dropped keeps its container, its socket and its presence registration for as
+ * long as the tab lives, and StrictMode opens two of them per mount.
  */
 export function useCollab(options?: ConnectOptions | null): UseCollabResult {
   const [session, setSession] = useState<CollabSession | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(Boolean(options));
   const [error, setError] = useState<Error | null>(null);
 
+  // Read inside the effect without being part of what re-runs it: the identity
+  // of `options` changes on every render of most callers, while the keys below
+  // are what actually decide whether this is a different connection.
+  const latestOptions = useRef(options);
+  latestOptions.current = options;
+
   const documentId = options?.documentId;
   const actorId = options?.actorId;
-  const collabKey = options?.collab ? JSON.stringify(options.collab) : undefined;
+  const collabKey = collabIdentity(options?.collab);
   const schemaKey =
     typeof options?.schema === "string"
       ? options.schema
       : options?.schema?.config?.schemaId || options?.schema?.name;
 
   useEffect(() => {
-    if (!options || !documentId) {
+    const current = latestOptions.current;
+    if (!current || !documentId) {
       setSession(null);
       setIsLoading(false);
       setError(null);
@@ -87,15 +128,21 @@ export function useCollab(options?: ConnectOptions | null): UseCollabResult {
     }
 
     let active = true;
+    let opened: WebCollab | undefined;
     setIsLoading(true);
     setError(null);
 
-    connect(options)
+    connect(current)
       .then((collab: WebCollab) => {
-        if (active) {
-          setSession(collab.session);
-          setIsLoading(false);
+        opened = collab;
+        if (!active) {
+          // Torn down while the connection was in flight. Nothing will ever
+          // read this session, so close it here rather than leaking it.
+          void collab.close();
+          return;
         }
+        setSession(collab.session);
+        setIsLoading(false);
       })
       .catch((err: unknown) => {
         if (active) {
@@ -107,10 +154,13 @@ export function useCollab(options?: ConnectOptions | null): UseCollabResult {
 
     return () => {
       active = false;
+      setSession(null);
+      void opened?.close();
     };
   }, [documentId, actorId, schemaKey, collabKey]);
 
   const snapshot = useCollabSnapshot(session);
+  const nodesByType = useMemo(() => groupByType(snapshot.nodes), [snapshot]);
 
   const upsertNode = useCallback(
     async (input: UpsertNodeInput, mutationOpts?: MutationOptions) => {
@@ -150,6 +200,7 @@ export function useCollab(options?: ConnectOptions | null): UseCollabResult {
     isLoading,
     isConnected: Boolean(session),
     error,
+    nodesByType,
     upsertNode,
     deleteNode,
     upsertEdge,
@@ -166,10 +217,7 @@ export function useCollabSnapshot(session: CollabSession | null | undefined): Gr
   const subscribe = useCallback(
     (onStoreChange: () => void) => {
       if (!store) return () => {};
-      store.listeners.add(onStoreChange);
-      return () => {
-        store.listeners.delete(onStoreChange);
-      };
+      return store.subscribe(onStoreChange);
     },
     [store],
   );
@@ -323,23 +371,137 @@ export function useCollabNodeState<V = unknown>(
       if (!session || !nodeId || !node) return;
       setIsSaving(true);
       try {
+        // Only the property being set. An upsert merges into what is stored, so
+        // resending the rest of the bag from a snapshot adds nothing — and puts
+        // this replica's view of every other field back on the wire.
         await session.upsertNode(
-          {
-            id: nodeId,
-            type: node.type,
-            properties: {
-              ...node.properties,
-              [propertyKey]: newValue,
-            },
-          },
+          { id: nodeId, type: node.type, properties: { [propertyKey]: newValue } },
           options,
         );
       } finally {
         setIsSaving(false);
       }
     },
-    [session, nodeId, node, propertyKey, options?.actorId],
+    [session, nodeId, node, propertyKey, options],
   );
 
   return [value, setValue, isSaving];
+}
+
+/**
+ * What a `ConnectOptions.collab` descriptor is, as a string, for deciding
+ * whether an effect is looking at the same connection as before.
+ *
+ * `JSON.stringify` on the whole descriptor throws on a `{ kind: "custom" }`
+ * backend holding a cycle, and a token provider is a function that stringifies
+ * away — so only the fields that name the relay are read.
+ */
+function collabIdentity(collab: ConnectOptions["collab"] | undefined): string | undefined {
+  if (!collab) {
+    return undefined;
+  }
+  const named = collab as { kind: string; relay?: string; url?: string; endpoint?: string; tenantId?: string; tokenEndpoint?: string };
+  return [named.kind, named.relay, named.url, named.endpoint, named.tenantId, named.tokenEndpoint]
+    .map((part) => part ?? "")
+    .join("|");
+}
+
+function groupByType(nodes: readonly GraphNodeRecord[]): Record<string, GraphNodeRecord[]> {
+  const grouped: Record<string, GraphNodeRecord[]> = {};
+  for (const node of nodes) {
+    const bucket = grouped[node.type] ?? [];
+    bucket.push(node);
+    grouped[node.type] = bucket;
+  }
+  return grouped;
+}
+
+export interface UseCollabJoinResult extends UseCollabResult {
+  /** What the join endpoint answered, once it has answered. */
+  join: JoinResponse | null;
+}
+
+/** The join payload a collabnode server hands a browser. */
+export interface JoinResponse {
+  documentId: string;
+  schema: ConnectOptions["schema"];
+  collab: ConnectOptions["collab"];
+  [key: string]: unknown;
+}
+
+export interface UseCollabJoinOptions {
+  /** Identity for writes from this browser. */
+  actorId?: string;
+  graph?: ConnectOptions["graph"];
+  /** Passed through to `fetch`, e.g. for credentials or an auth header. */
+  fetchOptions?: RequestInit;
+}
+
+/**
+ * Fetch a join descriptor from the server, then connect to what it describes.
+ *
+ * Every browser app needs this pair: the server owns the document id, the
+ * schema and the relay coordinates, and the browser cannot invent any of them.
+ * `url` is your join route — the one that answers
+ * `{ documentId, schema, collab }`.
+ */
+export function useCollabJoin(
+  url: string | null | undefined,
+  options: UseCollabJoinOptions = {},
+): UseCollabJoinResult {
+  const [join, setJoin] = useState<JoinResponse | null>(null);
+  const [joinError, setJoinError] = useState<Error | null>(null);
+  const { actorId, graph } = options;
+
+  // Read at fetch time, not depended on: a caller passing `{ credentials }`
+  // inline would otherwise hand this effect a new object every render, and the
+  // effect would re-fetch forever.
+  const fetchOptions = useRef(options.fetchOptions);
+  fetchOptions.current = options.fetchOptions;
+
+  useEffect(() => {
+    if (!url) {
+      setJoin(null);
+      return;
+    }
+    const controller = new AbortController();
+    setJoinError(null);
+    fetch(url, { ...fetchOptions.current, signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`join request failed: ${response.status}`);
+        }
+        return (await response.json()) as JoinResponse;
+      })
+      .then(setJoin)
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        setJoin(null);
+        setJoinError(error instanceof Error ? error : new Error(String(error)));
+      });
+    return () => controller.abort();
+  }, [url]);
+
+  const connectOptions = useMemo<ConnectOptions | null>(() => {
+    if (!join) {
+      return null;
+    }
+    return {
+      schema: join.schema,
+      documentId: join.documentId,
+      collab: join.collab,
+      ...(actorId !== undefined ? { actorId } : {}),
+      ...(graph !== undefined ? { graph } : {}),
+    };
+  }, [join, actorId, graph]);
+
+  const collab = useCollab(connectOptions);
+  return {
+    ...collab,
+    join,
+    isLoading: collab.isLoading || (Boolean(url) && !join && !joinError),
+    error: joinError ?? collab.error,
+  };
 }

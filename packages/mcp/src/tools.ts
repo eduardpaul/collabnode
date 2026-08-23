@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/server";
+import type { GraphSnapshot } from "@collabnode/graph";
 import {
   clampLimit,
   compactSnapshot,
@@ -20,7 +21,9 @@ import {
   upsertGraphNode,
   type CollabSession,
   type GraphNodeRef,
+  type GraphOpInput,
   type GraphSearchModes,
+  type NodeRef,
 } from "@collabnode/runtime";
 import {
   redactSchema,
@@ -142,6 +145,89 @@ function createNodeRefZod(language?: SupportedLanguage | string): ZodType {
     z.string().describe(t.tools.nodeRef.idOrPrefix),
     z.record(z.string(), z.unknown()).describe(t.tools.nodeRef.identityObject),
   ]);
+}
+
+/**
+ * The batch entries `session.applyBatch` accepts, as a schema rather than as
+ * prose. A discriminated union is what lets the policy check below switch on
+ * `op` and know the rest of the entry is the shape that goes with it — and it
+ * is checked on both paths into a tool, since `toAgentTools` hands arguments
+ * straight to the handler with no transport to validate them first.
+ *
+ * Endpoints are an id or `{ ref }` pointing at an earlier entry in the same
+ * batch; the identity-object form the single-write tools accept is not part of
+ * the batch API.
+ */
+function batchOpsZod(language?: SupportedLanguage | string): ZodType {
+  const t = getLocale(language);
+  const properties = z.record(z.string(), z.unknown()).optional();
+  const endpoint = z.union([
+    z.string().describe(t.tools.nodeRef.idOrPrefix),
+    z.object({ ref: z.string() }),
+  ]);
+  return z.array(
+    z.discriminatedUnion("op", [
+      z.object({
+        op: z.literal("upsertNode"),
+        type: z.string(),
+        ref: z.string().optional(),
+        id: z.string().optional(),
+        properties,
+        tags: z.array(z.string()).optional(),
+      }),
+      z.object({
+        op: z.literal("upsertEdge"),
+        type: z.string(),
+        id: z.string().optional(),
+        from: endpoint,
+        to: endpoint,
+        properties,
+      }),
+      z.object({ op: z.literal("deleteNode"), id: z.string() }),
+      z.object({ op: z.literal("deleteEdge"), id: z.string() }),
+    ]),
+  );
+}
+
+/**
+ * Enough of a `GraphSnapshot` for a diff to mean something. `schemaId` and
+ * `schemaHash` are optional because a caller hands back what it was given, and
+ * a diff is over nodes and edges either way.
+ */
+const propertyMapZod = z.record(z.string(), z.unknown());
+const metaZod = z.looseObject({});
+const snapshotZod = z.object({
+  schemaId: z.string().optional(),
+  schemaHash: z.string().optional(),
+  nodes: z.array(
+    z.object({
+      id: z.string(),
+      type: z.string(),
+      properties: propertyMapZod,
+      tags: z.array(z.string()).optional(),
+      meta: metaZod.optional(),
+    }),
+  ),
+  edges: z.array(
+    z.object({
+      id: z.string(),
+      type: z.string(),
+      from: z.string(),
+      to: z.string(),
+      properties: propertyMapZod,
+      meta: metaZod.optional(),
+    }),
+  ),
+});
+
+function parseSnapshot(value: unknown): GraphSnapshot {
+  const parsed = snapshotZod.parse(value);
+  return {
+    schemaId: parsed.schemaId ?? "",
+    schemaHash: parsed.schemaHash ?? "",
+    nodes: parsed.nodes.map((node) => ({ ...node, meta: node.meta ?? {} })),
+    edges: parsed.edges.map((edge) => ({ ...edge, meta: edge.meta ?? {} })),
+  } as GraphSnapshot;
 }
 
 function nodeUpsertInputSchema(
@@ -303,9 +389,67 @@ export function buildTools(
     return resolved;
   };
 
+  /**
+   * A batch endpoint is either an id or `{ ref }` naming a node created earlier
+   * in the same batch — whose type was already cleared when that entry was
+   * checked. Ids go through the same endpoint rule as `upsert_edge_*`.
+   */
+  const requireWritableBatchRef = (ref: NodeRef): NodeRef => {
+    if (typeof ref !== "string") {
+      return ref;
+    }
+    const resolved = requireWritableRef(ref);
+    // `requireWritableRef` returns an id for an id; the object form is only
+    // reachable from the identity-object input the batch API does not accept.
+    return typeof resolved === "string" ? resolved : ref;
+  };
+
+  /**
+   * Put every entry of a batch through the check its single-write tool would
+   * have applied, and return the ops with ids and endpoints resolved the way
+   * that tool would have resolved them.
+   *
+   * Node upserts are checked by type rather than by id, exactly as
+   * `upsert_node_*` is: the type is what the write lands as, a writable type is
+   * never a hidden one, and an id belonging to some other type is refused by
+   * the runtime's own type check. Resolving the id here instead would reject
+   * creates that carry a caller-chosen id, since that id matches nothing yet.
+   *
+   * A `{ ref }` endpoint needs no check of its own: it can only name a node
+   * created earlier in this same batch, whose type was already cleared above.
+   */
+  const authorizeBatchOps = (ops: GraphOpInput[]): GraphOpInput[] =>
+    ops.map((op) => {
+      if (op.op === "upsertNode") {
+        if (!access.canWrite(op.type)) {
+          throw new Error(t.tools.policy.readOnlyNodeType(op.type));
+        }
+        return op;
+      }
+      if (op.op === "upsertEdge") {
+        if (!access.canWriteEdge(op.type)) {
+          throw new Error(t.tools.policy.readOnlyEdgeType(op.type));
+        }
+        return {
+          ...op,
+          from: requireWritableBatchRef(op.from),
+          to: requireWritableBatchRef(op.to),
+        };
+      }
+      if (op.op === "deleteNode") {
+        return { ...op, id: requireWritableNode(op.id) };
+      }
+      if (op.op === "deleteEdge") {
+        return { ...op, id: requireWritableEdge(op.id) };
+      }
+      const unknown = op as { op?: unknown };
+      throw new Error(t.tools.policy.unknownBatchOp(String(unknown.op)));
+    });
+
   let tools: BoundTool[] = [];
   const modes = session.searchModes();
   const nodeRefZod = createNodeRefZod(lang);
+  const batchOps = batchOpsZod(lang);
 
   const add = (
     name: string,
@@ -574,34 +718,40 @@ export function buildTools(
       destructiveWrite,
     );
 
+    // One batch, the same write rules as the tools it stands in for. Without
+    // `authorizeBatchOps` this tool is a hole straight through the policy: it
+    // is reachable as soon as *any* type is writable, and `applyOps` knows
+    // nothing about roles, so a role allowed to write one node type could
+    // rewrite and delete every other one through here.
     add(
       "graph_apply_batch",
-      "Apply multiple node and edge operations atomically in a single batch transaction.",
-      z.object({
-        ops: z.array(z.record(z.string(), z.unknown())).describe("Array of batch operations (upsertNode, upsertEdge, deleteNode, deleteEdge)"),
-      }),
-      async (args) => {
-        const ops = args.ops as any[];
-        const result = await session.applyBatch(ops);
-        return textResult(result);
-      },
+      t.tools.applyBatch.description,
+      z.object({ ops: batchOps.describe(t.tools.applyBatch.ops) }),
+      async (args) =>
+        textResult(
+          await session.applyBatch(
+            authorizeBatchOps(batchOps.parse(args.ops) as GraphOpInput[]),
+          ),
+        ),
       idempotentWrite,
     );
   }
 
-  add(
-    "graph_diff_since",
-    "Compare a previous graph snapshot to the current state and return a readable change summary.",
-    z.object({
-      previousSnapshot: z.record(z.string(), z.unknown()).describe("The previous GraphSnapshot to compare against"),
-    }),
-    async (args) => {
-      const prev = args.previousSnapshot as any;
-      const diff = session.diffSince(prev);
-      return textResult(diff);
-    },
-    readOnly,
-  );
+  // Withheld from a concealing role for the reason `graph_query` is: a diff
+  // aggregates the whole graph into one answer, and there is no filtering it
+  // afterwards — the hidden types would be named in `ops` and spelled out in
+  // the Markdown. The role's own reads already show it everything it may see.
+  if (!concealing) {
+    add(
+      "graph_diff_since",
+      t.tools.diffSince.description,
+      z.object({
+        previousSnapshot: snapshotZod.describe(t.tools.diffSince.previousSnapshot),
+      }),
+      async (args) => textResult(session.diffSince(parseSnapshot(args.previousSnapshot))),
+      readOnly,
+    );
+  }
 
   for (const [type, def] of Object.entries(view.nodes)) {
     if (!access.canWrite(type)) {
@@ -872,36 +1022,125 @@ export function registerSessionTools(
   return tools.map((tool) => tool.name);
 }
 
-export interface AgentTool<TArgs = any, TResult = any> {
+export interface AgentTool<TArgs = Record<string, unknown>, TResult = unknown> {
   name: string;
   description: string;
+  /** The same zod schema the MCP transport validates against. */
   inputSchema: ZodType;
+  /** The tool's arguments as JSON Schema, for callers that cannot take zod. */
+  jsonSchema: JsonSchemaTool["parameters"];
   execute: (args: TArgs) => Promise<TResult>;
 }
 
 /**
  * Converts BoundTool[] into an in-process agent tool map suitable for
  * LangChain, Vercel AI SDK, AutoGen, or custom agent loops.
+ *
+ * `execute` validates its arguments before running, because nothing else on
+ * this path does: an MCP transport parses `inputSchema` for you, an in-process
+ * agent loop calls straight through.
  */
-export function toAgentTools(tools: BoundTool[]): Record<string, AgentTool> {
+export function toAgentTools(
+  tools: BoundTool[],
+  schema?: GraphSchema,
+): Record<string, AgentTool> {
   const result: Record<string, AgentTool> = {};
   for (const tool of tools) {
     result[tool.name] = {
       name: tool.name,
       description: tool.description,
       inputSchema: tool.inputSchema,
-      execute: async (args: any) => {
-        const res = await tool.handler(args ?? {});
+      jsonSchema: toolJsonSchema(tool, schema),
+      execute: async (args) => {
+        const parsed = tool.inputSchema.parse(args ?? {}) as Record<string, unknown>;
+        const res = await tool.handler(parsed);
         if (res.isError) {
-          throw new Error(res.content.map((c) => c.text).join("\n"));
+          throw new Error(res.content.map((entry) => entry.text).join("\n"));
         }
+        const text = res.content[0]?.text ?? "{}";
         try {
-          return JSON.parse(res.content[0]?.text ?? "{}");
+          return JSON.parse(text) as unknown;
         } catch {
-          return res.content[0]?.text ?? res;
+          return text;
         }
       },
     };
   }
   return result;
+}
+
+/** A tool as the function-calling APIs want it: a name, prose, JSON Schema. */
+export interface JsonSchemaTool {
+  name: string;
+  description: string;
+  parameters: {
+    type: "object";
+    properties: Record<string, unknown>;
+    required?: string[];
+    [key: string]: unknown;
+  };
+}
+
+/**
+ * One tool's arguments as JSON Schema, for the function-calling APIs that take
+ * no zod: the realtime voice models, the chat-completions `tools` array,
+ * anything speaking the OpenAI function shape.
+ *
+ * Pass `schema` to get `required` right. `buildTools` makes every upsert
+ * property optional, because an upsert is also a partial update — but a model
+ * reads optional-everything as permission to send a Note with a title and no
+ * body, announce that it wrote the note, and move on. Prose guidelines lose to
+ * the machine-readable contract, so the schema's own `required: true` flags are
+ * mirrored here. Bodies are replaced wholesale on write, so "send the whole
+ * thing" is the right contract for updates too.
+ */
+export function toolJsonSchema(
+  tool: BoundTool,
+  schema?: GraphSchema,
+): JsonSchemaTool["parameters"] {
+  const converted = z.toJSONSchema(tool.inputSchema, {
+    target: "draft-7",
+    io: "input",
+    unrepresentable: "any",
+  }) as Record<string, unknown>;
+  // `$schema` is noise to every consumer of this, and the realtime APIs reject
+  // the extra key outright.
+  const { $schema: _ignored, ...rest } = converted;
+  const parameters = {
+    type: "object" as const,
+    properties: {},
+    ...rest,
+  } as JsonSchemaTool["parameters"];
+  const required = schema ? requiredNodeProperties(tool.name, schema, parameters.properties) : [];
+  return required.length > 0 ? { ...parameters, required } : parameters;
+}
+
+/** Every tool in the list, in the shape the function-calling APIs expect. */
+export function toJsonSchemaTools(
+  tools: BoundTool[],
+  schema?: GraphSchema,
+): JsonSchemaTool[] {
+  return tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    parameters: toolJsonSchema(tool, schema),
+  }));
+}
+
+/** The `required: true` properties of the node type an upsert tool writes. */
+function requiredNodeProperties(
+  name: string,
+  schema: GraphSchema,
+  properties: Record<string, unknown>,
+): string[] {
+  const type = Object.keys(schema.nodes).find(
+    (nodeType) => toolName("upsert_node", nodeType) === name,
+  );
+  const def = type ? schema.nodes[type] : undefined;
+  if (!def) {
+    return [];
+  }
+  return Object.entries(def.properties)
+    .filter(([propName, prop]) => prop.required === true && propName in properties)
+    .map(([propName]) => propName);
 }

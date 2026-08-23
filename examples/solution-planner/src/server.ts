@@ -3,6 +3,7 @@ import {
   loadWorkspaceTypeFile,
   createHubMcpHandler,
   openCollab,
+  readBody,
   toWebRequest,
   writeWebResponse,
   memoryRegistry,
@@ -20,50 +21,44 @@ import {
   getPlannerState,
 } from "./agent/graph.ts";
 import { detectLanguage } from "./agent/llm.ts";
+import { writeSolutionState } from "./agent/state.ts";
 
 loadDotEnv();
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const port = Number(process.env.PORT ?? process.env.PLANNER_PORT ?? 4180);
-const collabKind = process.env.COLLAB_BACKEND === "hocuspocus" ? "hocuspocus" : "fluid";
 const redisUrl = process.env.REDIS_URL;
 
-// Start Collab Relay (e.g. Tinylicious for Fluid or in-process memory)
-let collabBackend: any;
-let collabJoin: any;
-let closeCollab: any;
+/**
+ * `COLLAB_BACKEND` picks the transport, and a bad one is a boot failure rather
+ * than a silent downgrade: a planner that quietly falls back to an in-process
+ * backend looks like it works right up until a second browser joins and sees
+ * an empty graph.
+ */
+const collabKind = (process.env.COLLAB_BACKEND ?? "fluid") as "fluid" | "hocuspocus" | "memory";
+const {
+  backend: collabBackend,
+  join: collabJoin,
+  close: closeCollab,
+} = await openCollab(
+  collabKind === "fluid" ? { kind: "fluid", storageDir: "data/tinylicious" } : { kind: collabKind },
+  "server",
+);
 
-try {
-  const collabOpened = await openCollab(
-    { kind: collabKind, storageDir: "data/tinylicious" },
-    "server",
-  );
-  collabBackend = collabOpened.backend;
-  collabJoin = collabOpened.join;
-  closeCollab = collabOpened.close;
-} catch {
-  // Fallback to memory backend if port or child process was unavailable
-  const collabOpened = await openCollab({ kind: "memory" }, "server");
-  collabBackend = collabOpened.backend;
-  collabJoin = collabOpened.join;
-  closeCollab = collabOpened.close;
-}
-
-// Registry setup (Redis if configured, otherwise in-memory)
-let registry: any;
-let redisClient: any;
-
-if (redisUrl) {
-  try {
-    redisClient = await createRedisClient(redisUrl);
-    registry = await redisRegistry({ client: redisClient, prefix: "collabnode:planner:" });
-    console.log(`Connected to Redis registry at ${redisUrl}`);
-  } catch (err) {
-    console.warn(`Redis connection failed (${err}), falling back to memoryRegistry`);
-    registry = memoryRegistry();
-  }
-} else {
-  registry = memoryRegistry();
+/**
+ * Redis when `REDIS_URL` is set, in-process otherwise — and a `REDIS_URL` that
+ * does not answer is a boot failure, for the same reason. The prefix carries no
+ * trailing colon: the registry adds its own separators.
+ */
+const redisClient = redisUrl ? await createRedisClient(redisUrl) : undefined;
+const registry = redisClient
+  ? await redisRegistry({ client: redisClient, prefix: "collabnode:planner" })
+  : memoryRegistry();
+if (redisClient) {
+  // One read before anything depends on it, so an unreachable cache says so
+  // here instead of three hops inside hub.open().
+  await registry.list({ state: "active" });
+  console.log(`Workspace registry     → Redis (${new URL(redisUrl!).host})`);
 }
 
 // Hub instance
@@ -77,31 +72,14 @@ const hub = await createHub({
 const plannerType = await loadWorkspaceTypeFile(join(root, "workspaces/solution-planner.yaml"));
 hub.define(plannerType);
 
-interface WorkspaceMeta {
-  id: string;
-  appName: string;
-  language: "en" | "es";
-  createdAt: string;
-}
-
-const workspaceList = new Map<string, WorkspaceMeta>();
-
-// Seed initial workspace
+// One workspace comes up seeded, on the id the README links to. Everything
+// else is created from the UI through the same `hub.open` path.
 const defaultWorkspaceId = "solution-planner-1";
-workspaceList.set(defaultWorkspaceId, {
+await hub.open("solution-planner", {
   id: defaultWorkspaceId,
-  appName: "Solution Planner Main",
-  language: "en",
-  createdAt: new Date().toISOString(),
-});
-
-const initialWorkspace = await hub.open("solution-planner", {
-  id: defaultWorkspaceId,
+  label: "Solution Planner Main",
   actorId: "server",
-  params: {
-    appName: "Solution Planner Main",
-    language: "en",
-  },
+  params: { appName: "Solution Planner Main", language: "en" },
 });
 
 const mcpHandler = createHubMcpHandler(hub, {
@@ -163,7 +141,7 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
       const state = getPlannerState(rec.id);
       return {
         id: rec.id,
-        appName: String(rec.params?.appName ?? rec.id),
+        appName: rec.label ?? String(rec.params?.appName ?? rec.id),
         language: (rec.params?.language as "en" | "es") ?? "en",
         status: state?.status ?? "idle",
         iteration: state?.iteration ?? 0,
@@ -190,6 +168,7 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
 
     await hub.open("solution-planner", {
       id,
+      label: appName,
       actorId: "server",
       params: { appName, language },
     });
@@ -199,8 +178,14 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
   }
 
   if (path.startsWith("/api/workspaces/") && method === "DELETE") {
-    const wsId = path.replace("/api/workspaces/", "").trim();
+    const wsId = decodeURIComponent(path.replace("/api/workspaces/", "")).trim();
     if (wsId && wsId !== defaultWorkspaceId) {
+      // `end()` first: dropping the record alone leaves this process holding a
+      // live document, its lease, and its relay connection for good.
+      const live = hub.getLiveWorkspace(wsId);
+      if (live) {
+        await live.end("explicit");
+      }
       await hub.registry.delete(wsId);
     }
     json(res, { deleted: wsId });
@@ -293,17 +278,14 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
       }
     }
 
-    await ws.session.upsertNode({
-      type: "SolutionState",
-      properties: {
-        appName: "Solution Planner Demo",
-        description: "Initial solution workspace",
-        language: "en",
-        status: "idle",
-        managerAgrees: false,
-        architectAgrees: false,
-        iteration: 0,
-      },
+    await writeSolutionState(ws.session, "server", {
+      appName: "Solution Planner Demo",
+      description: "Initial solution workspace",
+      language: "en",
+      status: "idle",
+      managerAgrees: false,
+      architectAgrees: false,
+      iteration: 0,
     });
 
     json(res, { reset: true });
@@ -319,14 +301,6 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
   }
 
   return false;
-}
-
-async function readBody(req: IncomingMessage): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks);
 }
 
 function parseJson(body: Buffer): Record<string, unknown> | undefined {
@@ -352,7 +326,7 @@ const shutdown = async () => {
   http.close();
   await vite.close();
   await hub.close();
-  await closeCollab?.();
+  await closeCollab();
   await redisClient?.quit?.();
 };
 

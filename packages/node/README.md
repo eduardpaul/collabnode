@@ -145,27 +145,26 @@ Host apps should depend on **`collabnode`**. Scoped packages are for advanced wi
 Do not import `AzureClient` / SharedTree in the app. Browsers are CRDT **peers** on the same `documentId` as `init()`:
 
 ```ts
-import { init, webJoinInfo, createFluidTokenHandler } from "collabnode";
-import { connect, httpTokenProvider } from "@collabnode/web";
+import { init, webJoinInfo, createFluidTokenHandler, hubDocumentAuthorizer } from "collabnode";
+import { connect } from "@collabnode/web";
 
 // Node
 const node = await init({
   schema: new URL("./schema.yaml", import.meta.url),
   actorId: "api",
-  collab: { kind: "fluid", storageDir: "data/tinylicious" }, // or azure / { kind: "hocuspocus" }
+  // Azure: { kind: "fluid", relay: "azure", tokenEndpoint: "/api/collab/token" }
+  collab: { kind: "fluid", storageDir: "data/tinylicious" }, // or { kind: "hocuspocus" }
 });
 // GET  /api/collab/join  → webJoinInfo(node)
-// POST /api/collab/token → createFluidTokenHandler({ tenantKey, user })  // Azure only
+// POST /api/collab/token → createFluidTokenHandler({ tenantKey, user, authorize })  // Azure only
 
-// Browser
+// Browser — the descriptor carries the token endpoint, so there is nothing to wire
 const join = await (await fetch("/api/collab/join")).json();
 const client = await connect({
   schema: join.schema,
   documentId: join.documentId,
   actorId: currentUser.id,
-  collab: join.collab.relay === "azure"
-    ? { ...join.collab, tokenProvider: httpTokenProvider("/api/collab/token") }
-    : join.collab,
+  collab: join.collab,
 });
 client.session.onChange((_ops, snapshot) => render(snapshot));
 await client.session.upsertNode({ type: "Task", properties: { title: "Draft Q3 plan" } });

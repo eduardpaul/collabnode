@@ -11,7 +11,7 @@ Application code never touches `AzureClient` or SharedTree. The browser is a pee
 ## Usage
 
 ```ts
-import { connect, httpTokenProvider } from "@collabnode/web";
+import { connect } from "@collabnode/web";
 
 const join = await (await fetch("/api/collab/join")).json();
 
@@ -19,9 +19,7 @@ const client = await connect({
   schema: join.schema,
   documentId: join.documentId,
   actorId: currentUser.id,
-  collab: join.collab.relay === "azure"
-    ? { ...join.collab, tokenProvider: httpTokenProvider("/api/collab/token") }
-    : join.collab,
+  collab: join.collab,
 });
 
 client.session.onChange((_ops, snapshot) => render(snapshot));
@@ -30,7 +28,7 @@ await client.session.upsertNode({ type: "Task", properties: { title: "Draft Q3 p
 
 The join payload comes from `webJoinInfo(node)` on the server. Hocuspocus uses the same shape with `collab.kind: "hocuspocus"` and a WebSocket `url`.
 
-> Never put an Azure tenant key in browser env. Browsers fetch a scoped token from your own endpoint — see `createFluidTokenHandler` in [`collabnode`](https://www.npmjs.com/package/collabnode).
+> Never put an Azure tenant key in browser env. On Azure the join descriptor carries a `tokenEndpoint`, and `connect()` fetches a token scoped to one document from it, sending the `actorId` you passed. Mount that route with `createFluidTokenHandler` in [`collabnode`](https://www.npmjs.com/package/collabnode); pass `tokenProvider` instead if you mint tokens some other way.
 
 ## Change feed
 

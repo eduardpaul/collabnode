@@ -125,6 +125,7 @@ export class Hub {
     const openedAt = new Date().toISOString();
     const initialRecord: WorkspaceRecord = {
       id,
+      ...(options.label ? { label: options.label } : {}),
       typeName: type.name,
       version: type.version,
       params,
@@ -141,6 +142,7 @@ export class Hub {
         id,
         type,
         params,
+        ...(options.label ? { label: options.label } : {}),
         openedAt,
         session,
         hub: this,
@@ -286,11 +288,19 @@ export class Hub {
     options: OpenWorkspaceOptions,
   ): Promise<Workspace> {
     const record = await this.registry.get(id);
+    // Joining with a label renames; joining without one leaves the name the
+    // workspace already has, so a replica that never saw the name cannot erase
+    // it by opening the workspace.
+    if (record && options.label && options.label !== record.label) {
+      await this.registry.put({ ...record, label: options.label });
+    }
     const session = await this.openSession(id, type, options, record?.collabDocId);
+    const label = options.label ?? record?.label;
     const ws = new Workspace({
       id,
       type,
       params,
+      ...(label ? { label } : {}),
       openedAt: record?.openedAt ?? new Date().toISOString(),
       session,
       hub: this,

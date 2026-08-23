@@ -4,6 +4,7 @@ import {
   createHubMcpHandler,
   openCollab,
   openEmbeddings,
+  readBody,
   SchemaError,
   systemPromptText,
   toWebRequest,
@@ -85,23 +86,19 @@ const boards = new BoardDirectory(hub, { mcpBase: "/mcp" });
  * same `hub.open` path the homepage's create button uses, so nothing about them
  * is special except that nobody had to click anything.
  */
-const wsVoice = boards.adopt(
-  await hub.open("voice-board", {
-    id: "voice-board-1",
-    actorId: "server",
-    params: { author: "Ada" },
-  }),
-  "Ada's Board",
-);
+const wsVoice = await hub.open("voice-board", {
+  id: "voice-board-1",
+  label: "Ada's Board",
+  actorId: "server",
+  params: { author: "Ada" },
+});
 
-boards.adopt(
-  await hub.open("c4-architecture", {
-    id: "c4-architecture-1",
-    actorId: "server",
-    params: { systemName: "Collabnode Platform", primaryUser: "Software Engineer" },
-  }),
-  "Collabnode Platform",
-);
+await hub.open("c4-architecture", {
+  id: "c4-architecture-1",
+  label: "Collabnode Platform",
+  actorId: "server",
+  params: { systemName: "Collabnode Platform", primaryUser: "Software Engineer" },
+});
 
 /**
  * `createHubMcpHandler` already reads `?lang=` and `Accept-Language` off each
@@ -377,7 +374,7 @@ async function handleCreateBoard(req: IncomingMessage, res: ServerResponse): Pro
 
   try {
     const ws = await boards.create({ typeName, name, params });
-    json(res, boards.summarize(ws, resolveLanguage(req)));
+    json(res, (await boards.summarizeById(ws.id, resolveLanguage(req))) ?? {});
   } catch (error) {
     if (error instanceof UnknownBoardTypeError || error instanceof SchemaError) {
       fail(res, 400, error.message);
@@ -415,14 +412,6 @@ function broadcast(entry: CallLog): void {
   for (const stream of logStreams) {
     stream.write(frame);
   }
-}
-
-async function readBody(req: IncomingMessage): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks);
 }
 
 function parseJson(body: Buffer): Record<string, unknown> | undefined {

@@ -1,10 +1,12 @@
 import {
   createFluidTokenHandler,
   createHub,
+  hubDocumentAuthorizer,
   loadWorkspaceTypeFile,
   createHubMcpHandler,
   openCollab,
   openEmbeddings,
+  readBody,
   SchemaError,
   systemPromptText,
   toWebRequest,
@@ -16,7 +18,6 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer as createViteServer } from "vite";
-import { redisBoardNames } from "./board-names.ts";
 import { BoardDirectory, UnknownBoardTypeError, type HubWorkspace } from "./boards.ts";
 import { azureFluidConfig, loadDotEnv, redisPrefix, redisUrl, voiceLiveConfig } from "./env.ts";
 import { strings, uiLanguage } from "./i18n.ts";
@@ -68,7 +69,10 @@ const embeddings = openEmbeddings(await localEmbeddingsIfInstalled());
  * from /api/fluid/token below.
  */
 const { backend: collabBackend, join: collabJoin, close: closeCollab } = await openCollab(
-  { kind: "fluid", relay: "azure" },
+  // `tokenEndpoint` is the one thing the browser needs and cannot work out: the
+  // join descriptor carries it, and @collabnode/web builds the token provider
+  // from it. The tenant key stays in this process.
+  { kind: "fluid", relay: "azure", tokenEndpoint: "/api/fluid/token" },
   "server",
 );
 
@@ -125,10 +129,7 @@ hub.define(c4ArchitectureType);
  * Boards are opened on demand from the homepage rather than fixed at boot, so
  * the directory — not a `const` per workspace — is what the routes below read.
  */
-const boards = new BoardDirectory(hub, {
-  mcpBase: "/mcp",
-  names: redisBoardNames(redis, prefix),
-});
+const boards = new BoardDirectory(hub, { mcpBase: "/mcp" });
 
 /**
  * Two boards still come up seeded, one of each type. They are only a starting
@@ -136,23 +137,19 @@ const boards = new BoardDirectory(hub, {
  * same `hub.open` path the homepage's create button uses, so nothing about them
  * is special except that nobody had to click anything.
  */
-const wsVoice = boards.adopt(
-  await hub.open("voice-board", {
-    id: "voice-board-1",
-    actorId: "server",
-    params: { author: "Ada" },
-  }),
-  "Ada's Board",
-);
+const wsVoice = await hub.open("voice-board", {
+  id: "voice-board-1",
+  label: "Ada's Board",
+  actorId: "server",
+  params: { author: "Ada" },
+});
 
-boards.adopt(
-  await hub.open("c4-architecture", {
-    id: "c4-architecture-1",
-    actorId: "server",
-    params: { systemName: "Collabnode Platform", primaryUser: "Software Engineer" },
-  }),
-  "Collabnode Platform",
-);
+await hub.open("c4-architecture", {
+  id: "c4-architecture-1",
+  label: "Collabnode Platform",
+  actorId: "server",
+  params: { systemName: "Collabnode Platform", primaryUser: "Software Engineer" },
+});
 
 /**
  * `createHubMcpHandler` already reads `?lang=` and `Accept-Language` off each
@@ -175,23 +172,17 @@ const config = voiceLiveConfig(defaultLanguage);
  * would mint a writable token for whatever `documentId` the caller typed,
  * including documents belonging to a different app in the same tenant.
  *
- * `?as=` is this sample's stand-in for a login, and it is exactly as
- * trustworthy as that sounds — a real deployment resolves the user from a
- * session or a bearer token and checks board membership inside `authorize`.
- * What the check below does guarantee, spoofed identity or not, is that the
- * document is one this hub actually opened.
+ * The `actorId` the browser sends is this sample's stand-in for a login, and it
+ * is exactly as trustworthy as that sounds — a real deployment resolves the
+ * user from a session or a bearer token and adds a membership check on top of
+ * `hubDocumentAuthorizer`. What that authorizer guarantees, spoofed identity or
+ * not, is that the document is one this hub actually opened.
  */
 const fluidToken = createFluidTokenHandler({
   tenantId: fluid.tenantId,
   tenantKey: fluid.key,
-  user: (request) => {
-    const who = new URL(request.url).searchParams.get("as")?.trim();
-    return { id: who || "guest", name: who || "guest" };
-  },
-  authorize: async ({ documentId }) => {
-    const records = await hub.list({ state: "active" });
-    return records.some((record) => record.collabDocId === documentId);
-  },
+  user: (_request, { actorId }) => ({ id: actorId || "guest", name: actorId || "guest" }),
+  authorize: hubDocumentAuthorizer(hub),
 });
 
 const calls = new Map<string, VoiceCall>();
@@ -472,7 +463,7 @@ async function handleCreateBoard(req: IncomingMessage, res: ServerResponse): Pro
 
   try {
     const ws = await boards.create({ typeName, name, params });
-    json(res, boards.summarize(ws, resolveLanguage(req)));
+    json(res, (await boards.summarizeById(ws.id, resolveLanguage(req))) ?? {});
   } catch (error) {
     if (error instanceof UnknownBoardTypeError || error instanceof SchemaError) {
       fail(res, 400, error.message);
@@ -510,14 +501,6 @@ function broadcast(entry: CallLog): void {
   for (const stream of logStreams) {
     stream.write(frame);
   }
-}
-
-async function readBody(req: IncomingMessage): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks);
 }
 
 function parseJson(body: Buffer): Record<string, unknown> | undefined {

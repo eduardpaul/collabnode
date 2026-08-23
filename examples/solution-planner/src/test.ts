@@ -79,6 +79,14 @@ async function runTest() {
   const c4 = snap2.nodes.filter((n) => n.type === "C4Model");
   const risks = snap2.nodes.filter((n) => n.type === "Risk");
 
+  // One SolutionState, however many turns the agents took. Without an id on the
+  // write, an upsert of a type with no `identity:` mints a new node each time
+  // and the UI reads whichever one the projection happens to return first.
+  const states = snap2.nodes.filter((n) => n.type === "SolutionState");
+  if (states.length !== 1) {
+    throw new Error(`expected exactly one SolutionState node, found ${states.length}`);
+  }
+
   console.log("✓ Final graph snapshot contents:");
   console.log(`  - Epics: ${epics.length}`);
   console.log(`  - Features: ${features.length}`);

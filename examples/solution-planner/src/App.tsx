@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { useCollab } from "@collabnode/react";
-import type { ConnectOptions } from "@collabnode/web";
+import { useCollabJoin } from "@collabnode/react";
 import type { CollabGraph } from "@collabnode/graph-view";
 
 interface AgentLog {
@@ -43,7 +42,6 @@ export function App() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [agentLogs, setAgentLogs] = useState<AgentLog[]>([]);
   const [validationComment, setValidationComment] = useState("");
-  const [connectOpts, setConnectOpts] = useState<ConnectOptions | null>(null);
   const [editingC4Id, setEditingC4Id] = useState<string | null>(null);
   const [c4DraftMarkdown, setC4DraftMarkdown] = useState<string>("");
 
@@ -68,23 +66,13 @@ export function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Fetch join info to initialize useCollab for currentWorkspaceId
-  useEffect(() => {
-    fetch(`/api/collab/join?workspace=${encodeURIComponent(currentWorkspaceId)}&lang=${lang}`)
-      .then((res) => res.json())
-      .then((join) => {
-        setConnectOpts({
-          schema: join.schema,
-          documentId: join.documentId,
-          actorId: "human-user",
-          collab: join.collab,
-        });
-      })
-      .catch((err) => console.error("Failed to join collab:", err));
-  }, [currentWorkspaceId, lang]);
-
-  const { session, snapshot, isConnected, isLoading, upsertNode, deleteNode, upsertEdge, deleteEdge } =
-    useCollab(connectOpts);
+  // The server owns the document id, the schema, and the relay coordinates;
+  // `useCollabJoin` asks for them and connects to what comes back.
+  const { session, snapshot, nodesByType, isConnected, isLoading, upsertNode, deleteNode, upsertEdge, deleteEdge } =
+    useCollabJoin(
+      `/api/collab/join?workspace=${encodeURIComponent(currentWorkspaceId)}&lang=${lang}`,
+      { actorId: "human-user" },
+    );
 
   // Bind session to <collab-graph> web component
   useEffect(() => {
@@ -96,13 +84,13 @@ export function App() {
   // Extract domain nodes from the live collaborative graph
   const nodes = snapshot?.nodes ?? [];
   const edges = snapshot?.edges ?? [];
-  const solutionState = nodes.find((n) => n.type === "SolutionState");
-  const epics = nodes.filter((n) => n.type === "Epic");
-  const features = nodes.filter((n) => n.type === "Feature");
-  const c4Models = nodes.filter((n) => n.type === "C4Model");
-  const tasks = nodes.filter((n) => n.type === "Task");
-  const risks = nodes.filter((n) => n.type === "Risk");
-  const assumptions = nodes.filter((n) => n.type === "Assumption");
+  const solutionState = nodesByType.SolutionState?.[0];
+  const epics = nodesByType.Epic ?? [];
+  const features = nodesByType.Feature ?? [];
+  const c4Models = nodesByType.C4Model ?? [];
+  const tasks = nodesByType.Task ?? [];
+  const risks = nodesByType.Risk ?? [];
+  const assumptions = nodesByType.Assumption ?? [];
 
   const currentStatus = String(solutionState?.properties.status ?? "idle");
   const managerAgrees = Boolean(solutionState?.properties.managerAgrees);

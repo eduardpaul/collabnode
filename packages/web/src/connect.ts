@@ -18,7 +18,9 @@ export async function connect(options: ConnectOptions): Promise<WebCollab> {
     );
   }
   const schema = resolveWebSchema(options.schema);
-  const backend = await openWebCollab(options.collab);
+  const backend = await openWebCollab(options.collab, {
+    ...(options.actorId !== undefined ? { actorId: options.actorId } : {}),
+  });
   const store =
     options.graph?.kind === "custom" ? options.graph.store : new InMemoryGraphStore();
   const session = await CollabSession.open(options.documentId, {

@@ -49,8 +49,11 @@
   },
   "devDependencies": {
     "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
     "@types/use-sync-external-store": "^0.0.6",
+    "jsdom": "^30.0.1",
     "react": "^19.0.0",
+    "react-dom": "^19.0.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.11"
   },

@@ -1,5 +1,4 @@
-import { buildTools, type BoundTool, type CollabSession, type GraphSchema } from "collabnode";
-import { z } from "zod";
+import { buildTools, toolJsonSchema, type BoundTool, type CollabSession } from "collabnode";
 
 /** A function tool as Voice Live / the realtime event protocol expects it. */
 export interface VoiceLiveTool {
@@ -60,7 +59,10 @@ export function voiceToolset(
       type: "function",
       name: tool.name,
       description: tool.description,
-      parameters: jsonSchema(tool, bound.schema),
+      // `toolJsonSchema` mirrors the schema's `required: true` flags into the
+      // definition. Without that a voice model reads every upsert argument as
+      // optional and says "I've added the note" having sent only a title.
+      parameters: toolJsonSchema(tool, bound.schema),
     })),
     names: tools.map((tool) => tool.name),
     async call(name, args) {
@@ -78,50 +80,6 @@ export function voiceToolset(
       return result.isError ? JSON.stringify({ error: text }) : text;
     },
   };
-}
-
-/** Zod → JSON Schema, minus the `$schema` key the realtime API has no use for. */
-function jsonSchema(tool: BoundTool, schema: GraphSchema): Record<string, unknown> {
-  const converted = z.toJSONSchema(tool.inputSchema, {
-    target: "draft-7",
-    io: "input",
-    unrepresentable: "any",
-  }) as Record<string, unknown>;
-  const { $schema: _ignored, ...rest } = converted;
-  const shape = { type: "object", properties: {}, ...rest } as Record<string, unknown>;
-  const required = requiredProperties(tool.name, schema, shape.properties as Record<string, unknown>);
-  return required.length > 0 ? { ...shape, required } : shape;
-}
-
-/**
- * `buildTools` makes every upsert argument optional, because an upsert is also
- * a partial update. A realtime voice model reads that as permission to create a
- * Note with a title and no body — it says "I've added the note with the
- * details" and sends `{title}` only. Prose guidelines do not beat the
- * machine-readable contract, so mirror the schema's own `required: true` flags
- * into the tool definition. Body is replaced wholesale on write anyway, so
- * "always send the full markdown" is the correct contract for updates too.
- */
-function requiredProperties(
-  toolName: string,
-  schema: GraphSchema,
-  properties: Record<string, unknown>,
-): string[] {
-  const match = /^upsert_node_(.+)$/.exec(toolName);
-  if (!match) {
-    return [];
-  }
-  const suffix = match[1];
-  const type = Object.keys(schema.nodes).find(
-    (name) => name.replace(/[^A-Za-z0-9_]/g, "_") === suffix,
-  );
-  const def = type ? schema.nodes[type] : undefined;
-  if (!def) {
-    return [];
-  }
-  return Object.entries(def.properties)
-    .filter(([name, prop]) => prop.required === true && name in properties)
-    .map(([name]) => name);
 }
 
 /**

@@ -3,6 +3,7 @@ import { snapshotToMarkdown } from "collabnode";
 import type { PlannerState, AgentLog } from "./types.ts";
 import { getChatModel } from "./llm.ts";
 import { extractJson } from "./json.ts";
+import { writeSolutionState } from "./state.ts";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 
 export async function runArchitectStep(
@@ -360,22 +361,16 @@ flowchart TD
     );
   }
 
-  await session.upsertNode(
-    {
-      type: "SolutionState",
-      properties: {
-        appName: state.description.slice(0, 40) || "Solution",
-        description: state.description,
-        language: state.language,
-        status: consensusReached ? "approved" : "planning",
-        managerAgrees: state.managerAgrees,
-        architectAgrees,
-        iteration,
-        pendingAssumptionId: undefined,
-      },
-    },
-    { actorId: "ai-architect" },
-  );
+  await writeSolutionState(session, "ai-architect", {
+    appName: state.description.slice(0, 40) || "Solution",
+    description: state.description,
+    language: state.language,
+    status: consensusReached ? "approved" : "planning",
+    managerAgrees: state.managerAgrees,
+    architectAgrees,
+    iteration,
+    pendingAssumptionId: undefined,
+  });
 
   return {
     logs,

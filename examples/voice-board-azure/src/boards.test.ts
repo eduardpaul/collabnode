@@ -90,12 +90,30 @@ await c4.session.upsertNode({
 });
 assert.equal((await boards.list("en"))[0]?.nodes, 3);
 
-// A board opened outside the directory (the two the server seeds at boot) still lists.
-const adopted = boards.adopt(
-  await hub.open("voice-board", { id: "voice-board-1", actorId: "server", params: { author: "Ada" } }),
+// A board opened outside the directory (the two the server seeds at boot) still
+// lists, under the label its registry record carries.
+const seeded = await hub.open("voice-board", {
+  id: "voice-board-1",
+  label: "Seeded Board",
+  actorId: "server",
+  params: { author: "Ada" },
+});
+assert.equal((await boards.list("en")).find((board) => board.id === seeded.id)?.name, "Seeded Board");
+
+// A board whose record has no label falls back to its type's display title.
+await hub.open("voice-board", { id: "voice-board-2", actorId: "server", params: { author: "Ada" } });
+assert.equal(
+  (await boards.list("en")).find((board) => board.id === "voice-board-2")?.name,
+  "Voice Board (Notes & Tasks)",
+);
+
+// The name a person typed survives a replica that never saw it: a second
+// directory over the same registry reads it off the record.
+const secondReplica = new BoardDirectory(hub, { mcpBase: "/mcp" });
+assert.equal(
+  (await secondReplica.list("en")).find((board) => board.id === seeded.id)?.name,
   "Seeded Board",
 );
-assert.equal((await boards.list("en")).find((board) => board.id === adopted.id)?.name, "Seeded Board");
 
 // Deleting frees the id and drops the board from the gallery.
 assert.equal(await boards.remove("c4-architecture-payments-platform-2"), true);

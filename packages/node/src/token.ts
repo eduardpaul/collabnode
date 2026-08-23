@@ -1,4 +1,5 @@
 import { staticKeyTokenProvider, type AzureFluidScope } from "@collabnode/azure";
+import type { Hub, WorkspaceRecord, WorkspaceRegistry } from "@collabnode/hub";
 
 export interface FluidTokenUser {
   id: string;
@@ -13,12 +14,32 @@ export interface FluidTokenRequest {
   request: Request;
 }
 
+/** What the request said, before anyone decided whether to believe it. */
+export interface FluidTokenClaim {
+  documentId: string;
+  /**
+   * The `actorId` the browser sent — `@collabnode/web` connect() puts its
+   * `actorId` here. It is a claim, not an identity: treat it the way you would
+   * treat any other field of the body.
+   */
+  actorId?: string;
+}
+
 export interface FluidTokenHandlerOptions {
   /** Tenant primary or secondary key. Defaults to `AZURE_FLUID_KEY`. */
   tenantKey?: string;
   tenantId?: string;
-  /** Who is asking. Throw to reject the request as unauthenticated. */
-  user: (request: Request) => FluidTokenUser | Promise<FluidTokenUser>;
+  /**
+   * Who is asking. Throw to reject the request as unauthenticated.
+   *
+   * The second argument is what the request claimed — the document, and the
+   * `actorId` the browser sent — so the common case does not have to re-read
+   * the body that was already parsed to find the document id.
+   */
+  user: (
+    request: Request,
+    claim: FluidTokenClaim,
+  ) => FluidTokenUser | Promise<FluidTokenUser>;
   /**
    * Whether this user may open this document. Required, and there is no
    * default: `user()` answers *who*, never *may they*, and a token minted from
@@ -59,22 +80,23 @@ export function createFluidTokenHandler(
   };
 
   return async (request: Request) => {
+    const claim = await readClaim(request);
+    if (!claim.documentId) {
+      // A token with an empty documentId is tenant-wide. Container creation
+      // needs one, and that happens server-side; a browser asking for one is
+      // either confused or probing.
+      return jsonError(400, "documentId is required");
+    }
+    const documentId = claim.documentId;
+
     let user: FluidTokenUser;
     try {
-      user = await options.user(request);
+      user = await options.user(request, claim);
     } catch (error) {
       return jsonError(401, error instanceof Error ? error.message : "unauthenticated");
     }
     if (!user?.id) {
       return jsonError(401, "unauthenticated");
-    }
-
-    const documentId = await readDocumentId(request);
-    if (!documentId) {
-      // A token with an empty documentId is tenant-wide. Container creation
-      // needs one, and that happens server-side; a browser asking for one is
-      // either confused or probing.
-      return jsonError(400, "documentId is required");
     }
 
     if (!(await options.authorize({ documentId, user, request }))) {
@@ -91,18 +113,56 @@ function jsonError(status: number, error: string): Response {
   return Response.json({ error }, { status });
 }
 
-async function readDocumentId(request: Request): Promise<string | undefined> {
+/** Read the body (or query) once, so `user` and `authorize` share one parse. */
+async function readClaim(request: Request): Promise<FluidTokenClaim> {
   const url = new URL(request.url);
-  const fromQuery = url.searchParams.get("documentId");
-  if (fromQuery) {
-    return fromQuery;
-  }
+  let body: { documentId?: unknown; actorId?: unknown } = {};
   try {
-    const body = (await request.clone().json()) as { documentId?: unknown };
-    return typeof body.documentId === "string" && body.documentId.length > 0
-      ? body.documentId
-      : undefined;
+    body = (await request.clone().json()) as typeof body;
   } catch {
-    return undefined;
+    // Not JSON, or no body at all: the query string is the other way in.
   }
+  const documentId =
+    url.searchParams.get("documentId") ??
+    (typeof body.documentId === "string" ? body.documentId : "");
+  const actorId =
+    url.searchParams.get("actorId") ??
+    (typeof body.actorId === "string" ? body.actorId : undefined);
+  return {
+    documentId,
+    ...(actorId ? { actorId } : {}),
+  };
+}
+
+/**
+ * `authorize` for a hub: the document has to be one this hub actually opened.
+ *
+ * This is the floor, not a policy — it stops a caller minting a token for a
+ * document belonging to some other app in the same tenant, and nothing more.
+ * Which *people* may open which boards is yours to add on top:
+ *
+ * ```ts
+ * authorize: async (context) =>
+ *   (await hubDocumentAuthorizer(hub)(context)) && isMember(context.user.id, context.documentId)
+ * ```
+ */
+export function hubDocumentAuthorizer(
+  hub: Pick<Hub, "registry" | "list">,
+): (context: FluidTokenRequest) => Promise<boolean> {
+  return async ({ documentId }) => {
+    if (!documentId) {
+      return false;
+    }
+    const registry = hub.registry as WorkspaceRegistry & {
+      findByCollabDocId?: (docId: string) => Promise<WorkspaceRecord | undefined>;
+    };
+    if (typeof registry.findByCollabDocId === "function") {
+      const record = await registry.findByCollabDocId(documentId);
+      return record?.state === "active" || record?.state === "seeding";
+    }
+    // No index on this registry: fall back to a scan, which is correct but
+    // costs one read per live workspace on every token request.
+    const records = await hub.list({ state: "active" });
+    return records.some((record) => record.collabDocId === documentId);
+  };
 }
