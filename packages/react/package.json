@@ -1,0 +1,64 @@
+{
+  "name": "@collabnode/react",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "React hooks and context primitives for collabnode real-time collaborative state.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eduardpaul/collabnode.git",
+    "directory": "packages/react"
+  },
+  "homepage": "https://github.com/eduardpaul/collabnode/tree/main/packages/react#readme",
+  "bugs": {
+    "url": "https://github.com/eduardpaul/collabnode/issues"
+  },
+  "keywords": [
+    "collabnode",
+    "react",
+    "hooks",
+    "crdt",
+    "collaboration",
+    "realtime"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@collabnode/collab": "workspace:*",
+    "@collabnode/graph": "workspace:*",
+    "@collabnode/runtime": "workspace:*",
+    "@collabnode/schema": "workspace:*",
+    "@collabnode/web": "workspace:*",
+    "use-sync-external-store": "^1.4.0"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/use-sync-external-store": "^0.0.6",
+    "react": "^19.0.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

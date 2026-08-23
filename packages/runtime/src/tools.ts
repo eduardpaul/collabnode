@@ -1280,6 +1280,21 @@ export async function deleteGraphEdge(
   };
 }
 
+export async function graphApplyBatch(
+  session: CollabSession,
+  args: { ops: import("./session.js").GraphOpInput[] },
+  options?: MutationOptions,
+): Promise<import("./session.js").ApplyOpsResult> {
+  return session.applyBatch(args.ops, options);
+}
+
+export function graphDiffSince(
+  session: CollabSession,
+  args: { previousSnapshot: GraphSnapshot },
+) {
+  return session.diffSince(args.previousSnapshot);
+}
+
 export function bindGraphTools(session: CollabSession, options: BindGraphToolsOptions = {}) {
   return {
     graphDescribe: () => graphDescribe(session),
@@ -1293,6 +1308,10 @@ export function bindGraphTools(session: CollabSession, options: BindGraphToolsOp
     graphHistory: (args?: GraphHistoryArgs) => graphHistory(session, args),
     graphChanges: (args?: GraphChangesArgs) => graphChanges(session, args),
     graphActors: () => graphActors(session),
+    graphApplyBatch: (args: { ops: import("./session.js").GraphOpInput[] }, mutation?: MutationOptions) =>
+      graphApplyBatch(session, args, mutation),
+    graphDiffSince: (args: { previousSnapshot: GraphSnapshot }) =>
+      graphDiffSince(session, args),
     upsertGraphNode: (input: UpsertNodeInput, mutation?: MutationOptions) =>
       upsertGraphNode(session, input, mutation),
     upsertGraphEdge: (input: UpsertGraphEdgeInput, mutation?: MutationOptions) =>

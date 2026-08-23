@@ -1,0 +1,35 @@
+{
+  "name": "@collabnode/example-solution-planner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --experimental-strip-types src/server.ts",
+    "start": "node --experimental-strip-types src/server.ts",
+    "test": "node --experimental-strip-types src/test.ts"
+  },
+  "dependencies": {
+    "@collabnode/graph-view": "workspace:*",
+    "@collabnode/react": "workspace:*",
+    "@collabnode/redis": "workspace:*",
+    "@collabnode/web": "workspace:*",
+    "@langchain/core": "^0.3.40",
+    "@langchain/google-genai": "^0.1.8",
+    "@langchain/langgraph": "^0.2.45",
+    "@langchain/openai": "^0.4.4",
+    "collabnode": "workspace:*",
+    "dotenv": "^16.4.7",
+    "ioredis": "^6.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "vite": "^8.2.2",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.12.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^6.0.3"
+  }
+}

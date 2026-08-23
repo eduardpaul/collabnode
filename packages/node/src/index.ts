@@ -36,6 +36,7 @@ export {
 export {
   CollabSession,
   Workspace,
+  BatchBuilder,
   bindGraphTools,
   compactSnapshot,
   compileTemplate,
@@ -52,7 +53,11 @@ export {
   graphSearch,
   graphSimilar,
   graphSnapshot,
+  graphApplyBatch,
+  graphDiffSince,
   resolveNodeRef,
+  snapshotToMarkdown,
+  diffSnapshotsToMarkdown,
   upsertGraphEdge,
   upsertGraphNode,
   validateParams,
@@ -62,6 +67,7 @@ export {
   type GraphNodeRef,
   type GraphSearchModes,
   type MutationOptions,
+  type SnapshotMarkdownOptions,
   type UpsertEdgeInput,
   type UpsertGraphEdgeInput,
   type UpsertNodeInput,
@@ -69,6 +75,9 @@ export {
 } from "@collabnode/runtime";
 export {
   guidelinesFor,
+  nodeTypeToJsonSchema,
+  schemaToJsonSchema,
+  propertyDefToJsonSchema,
   parseSchemaDocument,
   parseWorkspaceTypeDocument,
   resolveGuidelines,
@@ -79,6 +88,8 @@ export {
   type GraphSchema,
   type I18nString,
   type I18nStringList,
+  type JsonSchemaObject,
+  type JsonSchemaProperty,
 } from "@collabnode/schema";
 export { loadSchemaFile, loadWorkspaceTypeFile } from "@collabnode/schema/node";
 
@@ -114,6 +125,7 @@ export {
   toWebRequest,
   writeWebResponse,
   buildTools,
+  toAgentTools,
   systemPromptText,
   generatePrompts,
   getLocale,
@@ -121,6 +133,7 @@ export {
   normalizeLanguage,
   type McpLocaleCatalog,
   type SupportedLanguage,
+  type AgentTool,
   type BoundTool,
   type BuildToolsOptions,
   type GraphMcpServerOptions,

@@ -22,6 +22,7 @@
     "typecheck": "tsc -b --pretty false",
     "collabnode": "node packages/cli/dist/main.js",
     "bench": "node packages/bench/dist/main.js",
+    "planner": "pnpm --filter @collabnode/example-solution-planner dev",
     "publish:check": "pnpm -r --filter \"./packages/**\" --filter \"!@collabnode/bench\" exec npm pack --dry-run",
     "lint": "eslint .",
     "changeset": "changeset",

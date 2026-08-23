@@ -1,0 +1,276 @@
+type: solution-planner
+version: 1
+description:
+  en: Real-time collaborative solution planner between User, AI Manager, and AI Architect.
+  es: Planificador colaborativo de soluciones en tiempo real entre Usuario, Gestor IA y Arquitecto IA.
+
+schema:
+  name: SolutionPlannerGraph
+  version: 1
+  config:
+    schemaId: solution-planner
+    idStrategy: uuid
+    display:
+      title:
+        en: Solution Planner
+        es: Planificador de Soluciones
+    changeTracking:
+      enabled: true
+      mode: history
+  nodes:
+    SolutionState:
+      description:
+        en: High-level solution planning state and consensus tracking
+        es: Estado de planificación de la solución y seguimiento de consenso
+      properties:
+        appName:
+          type: string
+          required: true
+        description:
+          type: text
+        language:
+          type: enum
+          values: [en, es]
+          default: en
+        status:
+          type: enum
+          values: [idle, planning, waiting_user_validation, approved]
+          default: idle
+        managerAgrees:
+          type: boolean
+          default: false
+        architectAgrees:
+          type: boolean
+          default: false
+        iteration:
+          type: number
+          default: 0
+        pendingAssumptionId:
+          type: string
+      ui:
+        label: "{appName}"
+        color: "#6366f1"
+
+    Epic:
+      description:
+        en: High-level business initiative or milestone
+        es: Iniciativa de negocio de alto nivel o hito
+      identity:
+        from: [title]
+      properties:
+        title:
+          type: string
+          required: true
+          search:
+            boost: 6
+        description:
+          type: text
+        priority:
+          type: enum
+          values: [low, medium, high]
+          default: medium
+      ui:
+        label: "{title}"
+        color: "#3b82f6"
+
+    Feature:
+      description:
+        en: Concrete functional capability belonging to an Epic
+        es: Capacidad funcional concreta que pertenece a un Epic
+      identity:
+        from: [title]
+      properties:
+        title:
+          type: string
+          required: true
+          search:
+            boost: 6
+        description:
+          type: text
+        epicTitle:
+          type: string
+      ui:
+        label: "{title}"
+        color: "#06b6d4"
+
+    C4Model:
+      description:
+        en: C4 architecture diagram element or level
+        es: Elemento o nivel de diagrama de arquitectura C4
+      identity:
+        from: [title]
+      properties:
+        title:
+          type: string
+          required: true
+        level:
+          type: enum
+          values: [context, container, component]
+          default: container
+        markdown:
+          type: text
+      ui:
+        label: "{title}"
+        color: "#8b5cf6"
+
+    Task:
+      description:
+        en: Actionable implementation task scored on 6 estimation axes
+        es: Tarea ejecutable de implementación calificada en 6 ejes de estimación
+      identity:
+        from: [title]
+      properties:
+        title:
+          type: string
+          required: true
+          search:
+            boost: 6
+        description:
+          type: text
+        featureTitle:
+          type: string
+        functionalPoints:
+          type: string
+          description:
+            en: The What (business value / user journeys)
+            es: El Qué (valor de negocio / flujo de usuario)
+        technicalPoints:
+          type: string
+          description:
+            en: The How (infrastructure, tech debt, integrations)
+            es: El Cómo (infraestructura, deuda técnica, integraciones)
+        complexity:
+          type: number
+          default: 1
+          description:
+            en: 0 (Trivial) to 5 (Massive architectural overhaul)
+            es: 0 (Trivial) a 5 (Reforma arquitectónica masiva)
+        uncertainty:
+          type: number
+          default: 1
+          description:
+            en: 0 (Done 100x) to 5 (Pure R&D)
+            es: 0 (Hecho 100 veces) a 5 (I+D puro)
+        friction:
+          type: number
+          default: 1
+          description:
+            en: 0 (Solo work) to 5 (Heavy cross-team coordination)
+            es: 0 (Trabajo individual) a 5 (Fuerte coordinación entre equipos)
+        nfrScale:
+          type: number
+          default: 0
+          description:
+            en: 0 (Low/Internal) to 3 (Extreme compliance/scale)
+            es: 0 (Bajo/Interno) a 3 (Extrema escala/cumplimiento)
+        status:
+          type: enum
+          values: [todo, doing, done]
+          default: todo
+      ui:
+        label: "{title}"
+        color: "#10b981"
+
+    Risk:
+      description:
+        en: Identified business or technical risk with mitigation strategy
+        es: Riesgo técnico o de negocio identificado con estrategia de mitigación
+      identity:
+        from: [title]
+      properties:
+        title:
+          type: string
+          required: true
+        description:
+          type: text
+        severity:
+          type: enum
+          values: [low, medium, high, critical]
+          default: medium
+        category:
+          type: enum
+          values: [business, technical]
+          default: business
+        mitigation:
+          type: text
+      ui:
+        label: "{title}"
+        color: "#ef4444"
+
+    Assumption:
+      description:
+        en: Critical assumption requiring human-in-the-loop validation
+        es: Suposición crítica que requiere validación humana
+      identity:
+        from: [title]
+      properties:
+        title:
+          type: string
+          required: true
+        description:
+          type: text
+        status:
+          type: enum
+          values: [pending, approved, rejected]
+          default: pending
+        raisedBy:
+          type: enum
+          values: [manager, architect]
+          default: manager
+        userComment:
+          type: text
+      ui:
+        label: "{title}"
+        color: "#f59e0b"
+
+  edges:
+    HAS_FEATURE:
+      from: [Epic]
+      to: [Feature]
+      directed: true
+    HAS_TASK:
+      from: [Feature]
+      to: [Task]
+      directed: true
+    HAS_RISK:
+      from: [Epic, Feature, Task]
+      to: [Risk]
+      directed: true
+    HAS_ASSUMPTION:
+      from: [Epic, Feature, Task]
+      to: [Assumption]
+      directed: true
+    TARGETS_C4:
+      from: [Task]
+      to: [C4Model]
+      directed: true
+
+params:
+  appName:
+    type: string
+    default: "Solution Planner Demo"
+  language:
+    type: string
+    default: "en"
+
+template:
+  nodes:
+    - type: SolutionState
+      as: state
+      properties:
+        appName: "{appName}"
+        description: "Initial solution workspace"
+        language: "{language}"
+        status: idle
+        managerAgrees: false
+        architectAgrees: false
+        iteration: 0
+
+lifecycle:
+  idleTimeout: 30m
+  maxDuration: 24h
+
+projection: memory
+retention:
+  onEnd: keep
+  artifact: required

@@ -18,12 +18,14 @@ export {
 export {
   registerSessionTools,
   buildTools,
+  toAgentTools,
   compactSnapshot,
   queryToolDescription,
   searchToolDescription,
   similarToolDescription,
   SIMILAR_TOOL_DESCRIPTION,
   textResult,
+  type AgentTool,
   type BoundTool,
   type BuildToolsOptions,
 } from "./tools.js";

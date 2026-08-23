@@ -91,3 +91,10 @@ export {
   parseDuration,
   formatDuration,
 } from "./workspace-type.js";
+export {
+  nodeTypeToJsonSchema,
+  schemaToJsonSchema,
+  propertyDefToJsonSchema,
+  type JsonSchemaObject,
+  type JsonSchemaProperty,
+} from "./json-schema.js";

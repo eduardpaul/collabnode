@@ -573,7 +573,35 @@ export function buildTools(
         textResult(await deleteGraphEdge(session, { id: requireWritableEdge(String(args.id)) })),
       destructiveWrite,
     );
+
+    add(
+      "graph_apply_batch",
+      "Apply multiple node and edge operations atomically in a single batch transaction.",
+      z.object({
+        ops: z.array(z.record(z.string(), z.unknown())).describe("Array of batch operations (upsertNode, upsertEdge, deleteNode, deleteEdge)"),
+      }),
+      async (args) => {
+        const ops = args.ops as any[];
+        const result = await session.applyBatch(ops);
+        return textResult(result);
+      },
+      idempotentWrite,
+    );
   }
+
+  add(
+    "graph_diff_since",
+    "Compare a previous graph snapshot to the current state and return a readable change summary.",
+    z.object({
+      previousSnapshot: z.record(z.string(), z.unknown()).describe("The previous GraphSnapshot to compare against"),
+    }),
+    async (args) => {
+      const prev = args.previousSnapshot as any;
+      const diff = session.diffSince(prev);
+      return textResult(diff);
+    },
+    readOnly,
+  );
 
   for (const [type, def] of Object.entries(view.nodes)) {
     if (!access.canWrite(type)) {
@@ -842,4 +870,38 @@ export function registerSessionTools(
     );
   }
   return tools.map((tool) => tool.name);
+}
+
+export interface AgentTool<TArgs = any, TResult = any> {
+  name: string;
+  description: string;
+  inputSchema: ZodType;
+  execute: (args: TArgs) => Promise<TResult>;
+}
+
+/**
+ * Converts BoundTool[] into an in-process agent tool map suitable for
+ * LangChain, Vercel AI SDK, AutoGen, or custom agent loops.
+ */
+export function toAgentTools(tools: BoundTool[]): Record<string, AgentTool> {
+  const result: Record<string, AgentTool> = {};
+  for (const tool of tools) {
+    result[tool.name] = {
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      execute: async (args: any) => {
+        const res = await tool.handler(args ?? {});
+        if (res.isError) {
+          throw new Error(res.content.map((c) => c.text).join("\n"));
+        }
+        try {
+          return JSON.parse(res.content[0]?.text ?? "{}");
+        } catch {
+          return res.content[0]?.text ?? res;
+        }
+      },
+    };
+  }
+  return result;
 }

@@ -10,6 +10,7 @@ import type {
   Presence,
 } from "@collabnode/collab";
 import {
+  diffSnapshots,
   squash,
   stampMeta,
   GraphStoreError,
@@ -29,6 +30,7 @@ import {
   type QueryResult,
   type WorkspaceScope,
 } from "@collabnode/graph";
+import { diffSnapshotsToMarkdown } from "./snapshot-format.js";
 import {
   assertCrdtField,
   compileTemplate,
@@ -116,6 +118,33 @@ export type GraphOpInput =
       id?: string;
     }
   | { op: "deleteEdge"; id: string };
+
+export class BatchBuilder {
+  readonly ops: GraphOpInput[] = [];
+
+  upsertNode(input: UpsertNodeInput, ref?: string): NodeRef {
+    this.ops.push({ op: "upsertNode", ref, ...input });
+    return ref ? { ref } : (input.id ?? "");
+  }
+
+  upsertEdge(input: {
+    type: string;
+    from: NodeRef;
+    to: NodeRef;
+    properties?: Record<string, unknown>;
+    id?: string;
+  }): void {
+    this.ops.push({ op: "upsertEdge", ...input });
+  }
+
+  deleteNode(id: string): void {
+    this.ops.push({ op: "deleteNode", id });
+  }
+
+  deleteEdge(id: string): void {
+    this.ops.push({ op: "deleteEdge", id });
+  }
+}
 
 export interface ApplyOpsResult {
   /** Id per input entry, in order. Deletes report the id they removed. */
@@ -770,6 +799,44 @@ export class CollabSession {
     }
     await this.projector.drain();
     return { ids, refs: context.refs, applied: ops.length };
+  }
+
+  /**
+   * Alias for applyOps to apply a batch of graph operations atomically.
+   */
+  async applyBatch(ops: GraphOpInput[], options?: MutationOptions): Promise<ApplyOpsResult> {
+    return this.applyOps(ops, options);
+  }
+
+  /**
+   * Execute a batch of mutations using a fluent BatchBuilder.
+   */
+  async batch(
+    fn: (b: BatchBuilder) => void | Promise<void>,
+    options?: MutationOptions,
+  ): Promise<ApplyOpsResult> {
+    const builder = new BatchBuilder();
+    await fn(builder);
+    return this.applyOps(builder.ops, options);
+  }
+
+  /**
+   * Computes the diff between a previous snapshot and the current state,
+   * returning structural ops, human/LLM-readable markdown, and a boolean flag.
+   */
+  diffSince(previousSnapshot: GraphSnapshot): {
+    ops: GraphOp[];
+    markdown: string;
+    hasChanges: boolean;
+  } {
+    const current = this.snapshot();
+    const ops = diffSnapshots(previousSnapshot, current);
+    const markdown = diffSnapshotsToMarkdown(previousSnapshot, current);
+    return {
+      ops,
+      markdown,
+      hasChanges: ops.length > 0,
+    };
   }
 
   /**
