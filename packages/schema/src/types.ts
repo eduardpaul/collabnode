@@ -215,12 +215,36 @@ export interface NamedToolDef {
   parameters?: Record<string, unknown>;
 }
 
+/**
+ * What one agent role may do with each node type. Two separate powers, because
+ * "may not write it" and "may not know it exists" are different requirements:
+ * a reviewer that must read decisions without editing them is `readOnly`, while
+ * a note the facilitator keeps off an outside agent's map is `hidden`.
+ *
+ * Both lists name node types, and `*` stands for every node type in the schema,
+ * so a fully passive observer is `readOnly: ["*"]`. Hidden wins wherever the two
+ * overlap — there is nothing left to read.
+ */
+export interface AgentNodePolicy {
+  /** Readable, never writable: no upsert tool, no delete, no template of one. */
+  readOnly?: string[];
+  /**
+   * Absent from the agent's world: struck from its schema view, prompts,
+   * resources and tool surface, and filtered out of every read result. Ids of
+   * hidden nodes resolve as `unknown id`, the same answer an id that never
+   * existed gets, so absence and denial are indistinguishable.
+   */
+  hidden?: string[];
+}
+
 export interface AgentDef {
   role: string;
   actorId: string;
   description?: I18nString;
   systemPrompt?: I18nString;
   tools?: string[];
+  /** Per-node-type read/write reach for this role. */
+  nodes?: AgentNodePolicy;
 }
 
 export interface ToolsPolicyDef {

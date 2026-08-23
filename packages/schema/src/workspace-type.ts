@@ -1,5 +1,6 @@
 import { parse as parseYaml } from "yaml";
 import { ZodError } from "zod";
+import { ALL_NODE_TYPES } from "./agent-policy.js";
 import { normalizePropertyMap, parseSchemaDocument } from "./parse.js";
 
 import {
@@ -110,6 +111,32 @@ export function validateWorkspaceType(wsType: WorkspaceType): void {
     }
     if (lifecycle.maxDuration !== undefined) {
       parseDuration(lifecycle.maxDuration, "lifecycle.maxDuration");
+    }
+  }
+
+  if (tools?.agents) {
+    const seen = new Set<string>();
+    for (let i = 0; i < tools.agents.length; i++) {
+      const agent = tools.agents[i]!;
+      if (seen.has(agent.role)) {
+        throw new SchemaError(
+          `duplicate agent role '${agent.role}'`,
+          `tools.agents[${i}].role`,
+        );
+      }
+      seen.add(agent.role);
+      for (const key of ["readOnly", "hidden"] as const) {
+        const list = agent.nodes?.[key] ?? [];
+        for (let j = 0; j < list.length; j++) {
+          const type = list[j]!;
+          if (type !== ALL_NODE_TYPES && !(type in schema.nodes)) {
+            throw new SchemaError(
+              `agent '${agent.role}' ${key} references undeclared node type '${type}'`,
+              `tools.agents[${i}].nodes.${key}[${j}]`,
+            );
+          }
+        }
+      }
     }
   }
 
@@ -263,6 +290,10 @@ export function parseWorkspaceTypeDocument(source: string, origin = "<yaml>"): W
       description: a.description,
       systemPrompt: a.systemPrompt,
       tools: a.tools,
+      nodes:
+        a.nodes && (a.nodes.readOnly?.length || a.nodes.hidden?.length)
+          ? { readOnly: a.nodes.readOnly, hidden: a.nodes.hidden }
+          : undefined,
     }));
     tools = {
       expose: raw.tools.expose,

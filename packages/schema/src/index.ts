@@ -1,5 +1,6 @@
 export type {
   AgentDef,
+  AgentNodePolicy,
   ArtifactRequirement,
   ChangeTrackingConfig,
   CrdtPropertyType,
@@ -75,6 +76,14 @@ export {
 export { generateId, identityId, ulid } from "./identity.js";
 export { canonicalJson, sha256Canonical, sha256Hex } from "./hash.js";
 export { compileTemplate, validateParams } from "./template.js";
+export {
+  ALL_NODE_TYPES,
+  nodeAccessFrom,
+  openNodeAccess,
+  redactSchema,
+  resolveNodeAccess,
+  type NodeAccessPolicy,
+} from "./agent-policy.js";
 export {
   parseWorkspaceTypeDocument,
   validateWorkspaceType,

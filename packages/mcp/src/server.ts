@@ -1,6 +1,6 @@
 import type { Workspace } from "@collabnode/hub";
 import type { CollabSession } from "@collabnode/runtime";
-import type { WorkspaceType } from "@collabnode/schema";
+import { resolveNodeAccess, type WorkspaceType } from "@collabnode/schema";
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod/v4";
 import { getLocale, type SupportedLanguage } from "./i18n.js";
@@ -171,14 +171,20 @@ export function createWorkspaceMcpServer(
     );
   }
 
+  const access = resolveNodeAccess(schema, type?.tools, options.agentRole);
+
   registerSessionTools(schema, session, server, {
     graphKind: options.graphKind ?? "memory",
     policy: type?.tools,
     agentRole: options.agentRole,
     language: defaultLanguage,
+    access,
   });
 
-  for (const resource of generateResources(schema, session, { language: defaultLanguage })) {
+  for (const resource of generateResources(schema, session, {
+    language: defaultLanguage,
+    access,
+  })) {
     server.registerResource(
       resource.name,
       resource.uri,

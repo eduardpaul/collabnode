@@ -125,6 +125,9 @@ export interface McpLocaleCatalog {
       tags: string;
       intoParent: (intoType: string, toTypes: string) => string;
     };
+    policy: {
+      readOnlyNodeType: (type: string) => string;
+    };
     propertyDescriptions: {
       datetime: string;
       datetimeWithDesc: (desc: string) => string;

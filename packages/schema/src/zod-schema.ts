@@ -406,12 +406,18 @@ export const rawNamedTool = z.strictObject({
   parameters: z.record(z.string(), z.unknown()).optional(),
 });
 
+export const rawAgentNodes = z.strictObject({
+  readOnly: z.array(z.string().min(1)).optional(),
+  hidden: z.array(z.string().min(1)).optional(),
+});
+
 export const rawAgent = z.strictObject({
   role: z.string().min(1),
   actorId: z.string().min(1),
   description: i18nString.optional(),
   systemPrompt: i18nString.optional(),
   tools: z.array(z.string()).optional(),
+  nodes: rawAgentNodes.optional(),
 });
 
 export const rawTools = z.strictObject({

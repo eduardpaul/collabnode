@@ -276,6 +276,57 @@ Prompts, tools, and resources are generated from the YAML (`graph-system`, `work
 
 Stdio MCP is CLI-only (it owns stdin). In an API process, use `init({ mcp: true })` and mount `handleMcp`, or use `@collabnode/hub` with `createHubMcpHandler` for scoped multi-workspace routing (`/mcp/w/:workspaceId`).
 
+### Per-agent node policy
+
+A workspace type can give each agent role a different reach over node types. Two
+powers, because "may not change it" and "may not know it exists" are different
+requirements:
+
+```yaml
+tools:
+  agents:
+    - role: facilitator          # no policy: full reach
+      actorId: facilitator-bot
+    - role: reviewer
+      actorId: reviewer-bot
+      nodes:
+        readOnly: [Decision]     # see but no touch
+        hidden: [PrivateNote]    # does not see, cannot learn it exists
+    - role: observer
+      actorId: observer-bot
+      nodes:
+        readOnly: ["*"]          # reads everything, writes nothing
+```
+
+`*` stands for every node type; `hidden` wins wherever the two lists overlap.
+Both lists are validated against the schema at parse time, so a typo is a load
+error rather than a silently open door. The role is matched by `role` or by
+`actorId` — the same lookup `tools` filtering and role prompts already use.
+
+**`readOnly`** — the type still appears in `graph_describe` (marked
+`readOnly: true`), `graph_list`, `graph_search` and the rest. What goes away is
+`upsert_node_<Type>`, deletes of those nodes, and any named tool that
+`creates:` one. Edges count as touching their endpoints, so an edge write with a
+read-only endpoint is refused too: `upsert_edge_<Type>` disappears when no
+instance of it could be written, and is checked per call when only some could.
+
+**`hidden`** — the type never reaches the role at all. It is struck from the
+schema resource, the generated prompts, the tool surface, and every read result
+(`graph_list`, `graph_search`, `graph_similar`, `graph_snapshot`,
+`graph_neighbors`, `graph_get`, `graph_history`, `graph_changes`,
+`collabnode://snapshot`), along with edges that touch a hidden node. Ids of
+hidden nodes answer `unknown id`, exactly as ids that never existed do, and a
+unique-prefix or identity lookup cannot prove otherwise. A role with hidden types
+gets no `graph_query`: Cypher runs against the projection, which cannot be scoped
+to one role's view, and a filtered result set is no defence against an aggregate.
+
+Policy applies to the MCP surface — the tools, prompts, and resources an agent is
+given. It is not a substitute for transport auth: a caller that can reach the
+document directly through `CollabSession` is not bound by it. On the hub
+endpoint the role defaults to the caller-supplied `?role=`, which is fine for
+steering a cooperative agent but not for confining an untrusted one — pass
+`agentRoleFrom` to `createHubMcpHandler` to derive the role from your own auth.
+
 ## Example: Voice Board (Voice Live + WebRTC + Multi-Workspace)
 
 Dictate notes, track tasks, and collaborate in real-time by voice (Azure Voice Live over WebRTC) and live text:

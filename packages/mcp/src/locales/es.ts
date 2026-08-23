@@ -160,6 +160,10 @@ export const ES_CATALOG: McpLocaleCatalog = {
       intoParent: (intoType, toTypes) =>
         `Id del nodo padre de destino (o prefijo único) para conectar mediante ${intoType} (${toTypes}).`,
     },
+    policy: {
+      readOnlyNodeType: (type) =>
+        `Los nodos ${type} son de solo lectura para este rol de agente: se pueden leer, pero no crear, actualizar ni eliminar.`,
+    },
     propertyDescriptions: {
       datetime: "Fecha y hora ISO-8601",
       datetimeWithDesc: (desc) => `${desc} (fecha y hora ISO-8601)`,

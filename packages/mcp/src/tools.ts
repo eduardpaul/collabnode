@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import {
+  clampLimit,
   compactSnapshot,
   deleteGraphEdge,
   deleteGraphNode,
@@ -14,6 +15,7 @@ import {
   graphSearch,
   graphSimilar,
   graphSnapshot,
+  resolveNodeRef,
   upsertGraphEdge,
   upsertGraphNode,
   type CollabSession,
@@ -21,10 +23,13 @@ import {
   type GraphSearchModes,
 } from "@collabnode/runtime";
 import {
+  redactSchema,
   resolveGuidelines,
   resolveI18nString,
+  resolveNodeAccess,
   type GraphSchema,
   type NamedToolDef,
+  type NodeAccessPolicy,
   type NodeTypeDef,
   type ToolsPolicyDef,
 } from "@collabnode/schema";
@@ -40,6 +45,20 @@ import {
 } from "./i18n.js";
 import { toolName } from "./names.js";
 import { propertiesZod, propertyZod } from "./property-zod.js";
+import {
+  emptyList,
+  filterChanges,
+  filterDescribe,
+  filterGet,
+  filterHistory,
+  filterNeighbors,
+  filterSearch,
+  filterSnapshot,
+  narrowTypes,
+  noNodeMatchesError,
+  nodeTypeOf,
+  resolveVisible,
+} from "./visibility.js";
 
 export { compactSnapshot };
 
@@ -194,6 +213,11 @@ export interface BuildToolsOptions {
   policy?: ToolsPolicyDef;
   agentRole?: string;
   language?: SupportedLanguage | string;
+  /**
+   * Node-type reach for this caller. Defaults to the policy declared for
+   * `agentRole`; pass one to reuse a policy already resolved elsewhere.
+   */
+  access?: NodeAccessPolicy;
 }
 
 export function buildTools(
@@ -209,6 +233,75 @@ export function buildTools(
   const policy = options.policy;
   const lang = options.language;
   const t = getLocale(lang);
+
+  // What this role may see and write. `view` is the schema with hidden types
+  // struck out, and it — not `schema` — is what generates the tool surface, so
+  // a hidden type never reaches the model even as a tool name.
+  const access = options.access ?? resolveNodeAccess(schema, policy, options.agentRole);
+  const view = redactSchema(schema, access);
+  const concealing = access.hidden.size > 0;
+
+  /** Resolves an id this role is allowed to act on, or reports it as unknown. */
+  const visibleId = (id: string, kinds: Array<"node" | "edge"> = ["node", "edge"]): string =>
+    concealing ? resolveVisible(session, access, id, kinds).id : id;
+
+  /** Resolves an edge endpoint, refusing hidden nodes as if they did not exist. */
+  const visibleRef = (ref: GraphNodeRef): GraphNodeRef => {
+    if (!concealing) {
+      return ref;
+    }
+    if (typeof ref === "string") {
+      return resolveVisible(session, access, ref, ["node"]).id;
+    }
+    // Identity objects have to go through the runtime's own matcher, so the
+    // hidden check lands after resolution — with the not-found wording the
+    // runtime would have used, to keep a hidden node indistinguishable from one
+    // that was never there.
+    const id = resolveNodeRef(session, ref);
+    const type = nodeTypeOf(session, id);
+    if (type && access.isHidden(type)) {
+      throw noNodeMatchesError(ref);
+    }
+    return id;
+  };
+
+  const refuseUnwritable = (nodeId: string): void => {
+    const type = nodeTypeOf(session, nodeId);
+    if (type && !access.canWrite(type)) {
+      throw new Error(t.tools.policy.readOnlyNodeType(type));
+    }
+  };
+
+  const requireWritableNode = (id: string): string => {
+    const resolved = visibleId(id, ["node"]);
+    refuseUnwritable(resolved);
+    return resolved;
+  };
+
+  /**
+   * Endpoints of an edge write. Attaching or detaching an edge changes how both
+   * of its endpoints read to everyone else, so a read-only node cannot be one.
+   */
+  const requireWritableRef = (ref: GraphNodeRef): GraphNodeRef => {
+    const resolved = visibleRef(ref);
+    if (typeof resolved === "string") {
+      refuseUnwritable(resolved);
+      return resolved;
+    }
+    const id = resolveNodeRef(session, resolved);
+    refuseUnwritable(id);
+    return id;
+  };
+
+  const requireWritableEdge = (id: string): string => {
+    const resolved = visibleId(id, ["edge"]);
+    const edge = session.snapshot().edges.find((record) => record.id === resolved);
+    if (edge) {
+      refuseUnwritable(edge.from);
+      refuseUnwritable(edge.to);
+    }
+    return resolved;
+  };
 
   let tools: BoundTool[] = [];
   const modes = session.searchModes();
@@ -228,7 +321,10 @@ export function buildTools(
     "graph_describe",
     t.tools.describe,
     z.object({}),
-    async () => textResult(graphDescribe(session)),
+    async () => {
+      const described = graphDescribe(session);
+      return textResult(access.restricted ? filterDescribe(described, access) : described);
+    },
   );
 
   add(
@@ -241,16 +337,27 @@ export function buildTools(
       limit: z.number().optional().describe(t.tools.list.limit),
       offset: z.number().optional().describe(t.tools.list.offset),
     }),
-    async (args) =>
-      textResult(
+    async (args) => {
+      const { types, empty } = narrowTypes(
+        Array.isArray(args.types) ? (args.types as string[]) : undefined,
+        access,
+      );
+      const offset = typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : 0;
+      if (empty) {
+        return textResult(
+          emptyList(offset, clampLimit(typeof args.limit === "number" ? args.limit : undefined)),
+        );
+      }
+      return textResult(
         graphList(session, {
-          types: Array.isArray(args.types) ? (args.types as string[]) : undefined,
+          types,
           tag: typeof args.tag === "string" ? args.tag : undefined,
           q: typeof args.q === "string" ? args.q : undefined,
           limit: typeof args.limit === "number" ? args.limit : undefined,
           offset: typeof args.offset === "number" ? args.offset : undefined,
         }),
-      ),
+      );
+    },
   );
 
   add(
@@ -259,7 +366,10 @@ export function buildTools(
     z.object({
       id: z.string().describe(t.tools.get.id),
     }),
-    async (args) => textResult(graphGet(session, { id: String(args.id) })),
+    async (args) => {
+      const result = graphGet(session, { id: visibleId(String(args.id)) });
+      return textResult(concealing ? filterGet(result, session, access) : result);
+    },
   );
 
   add(
@@ -274,15 +384,22 @@ export function buildTools(
       tag: z.string().optional().describe(t.tools.search.tag),
       limit: z.number().optional().describe(t.tools.search.limit),
     }),
-    async (args) =>
-      textResult(
-        await graphSearch(session, {
-          q: typeof args.q === "string" ? args.q : undefined,
-          types: Array.isArray(args.types) ? (args.types as string[]) : undefined,
-          tag: typeof args.tag === "string" ? args.tag : undefined,
-          limit: typeof args.limit === "number" ? args.limit : undefined,
-        }),
-      ),
+    async (args) => {
+      const { types, empty } = narrowTypes(
+        Array.isArray(args.types) ? (args.types as string[]) : undefined,
+        access,
+      );
+      if (empty) {
+        return textResult({ nodes: [], total: 0 });
+      }
+      const result = await graphSearch(session, {
+        q: typeof args.q === "string" ? args.q : undefined,
+        types,
+        tag: typeof args.tag === "string" ? args.tag : undefined,
+        limit: typeof args.limit === "number" ? args.limit : undefined,
+      });
+      return textResult(concealing ? filterSearch(result, access) : result);
+    },
   );
 
   if (modes.vector) {
@@ -294,14 +411,21 @@ export function buildTools(
         types: z.array(z.string()).optional().describe(t.tools.similar.types),
         limit: z.number().optional().describe(t.tools.similar.limit),
       }),
-      async (args) =>
-        textResult(
-          await graphSimilar(session, {
-            id: String(args.id),
-            types: Array.isArray(args.types) ? (args.types as string[]) : undefined,
-            limit: typeof args.limit === "number" ? args.limit : undefined,
-          }),
-        ),
+      async (args) => {
+        const { types, empty } = narrowTypes(
+          Array.isArray(args.types) ? (args.types as string[]) : undefined,
+          access,
+        );
+        if (empty) {
+          return textResult({ nodes: [], total: 0 });
+        }
+        const result = await graphSimilar(session, {
+          id: visibleId(String(args.id), ["node"]),
+          types,
+          limit: typeof args.limit === "number" ? args.limit : undefined,
+        });
+        return textResult(concealing ? filterSearch(result, access) : result);
+      },
     );
   }
 
@@ -315,16 +439,16 @@ export function buildTools(
       depth: z.number().optional().describe(t.tools.neighbors.depth),
       limit: z.number().optional().describe(t.tools.neighbors.limit),
     }),
-    async (args) =>
-      textResult(
-        graphNeighbors(session, {
-          id: String(args.id),
-          edgeTypes: Array.isArray(args.edgeTypes) ? (args.edgeTypes as string[]) : undefined,
-          direction: args.direction === "in" || args.direction === "out" ? args.direction : undefined,
-          depth: typeof args.depth === "number" ? args.depth : undefined,
-          limit: typeof args.limit === "number" ? args.limit : undefined,
-        }),
-      ),
+    async (args) => {
+      const result = graphNeighbors(session, {
+        id: visibleId(String(args.id), ["node"]),
+        edgeTypes: Array.isArray(args.edgeTypes) ? (args.edgeTypes as string[]) : undefined,
+        direction: args.direction === "in" || args.direction === "out" ? args.direction : undefined,
+        depth: typeof args.depth === "number" ? args.depth : undefined,
+        limit: typeof args.limit === "number" ? args.limit : undefined,
+      });
+      return textResult(concealing ? filterNeighbors(result, session, access) : result);
+    },
   );
 
   add(
@@ -334,39 +458,55 @@ export function buildTools(
       types: z.array(z.string()).optional().describe(t.tools.snapshot.types),
       includeText: z.boolean().optional().describe(t.tools.snapshot.includeText),
     }),
-    async (args) =>
-      textResult(
-        graphSnapshot(session, {
-          types: Array.isArray(args.types) ? (args.types as string[]) : undefined,
-          includeText: args.includeText === true,
-        }),
-      ),
+    async (args) => {
+      const { types, empty } = narrowTypes(
+        Array.isArray(args.types) ? (args.types as string[]) : undefined,
+        access,
+      );
+      const snapshot = session.snapshot();
+      if (empty) {
+        return textResult({
+          schemaId: snapshot.schemaId,
+          schemaHash: snapshot.schemaHash,
+          nodes: [],
+          edges: [],
+        });
+      }
+      const result = graphSnapshot(session, { types, includeText: args.includeText === true });
+      return textResult(concealing ? filterSnapshot(result, session, access) : result);
+    },
   );
 
-  add(
-    "graph_query",
-    queryToolDescription(graphKind, schema, lang),
-    z.object({
-      cypher: z.string().describe(t.tools.query.cypher),
-      params: z.record(z.string(), z.unknown()).optional().describe(t.tools.query.params),
-      limit: z.number().optional().describe(t.tools.query.limit),
-    }),
-    async (args) =>
-      textResult(
-        await graphQuery(
-          session,
-          {
-            cypher: String(args.cypher),
-            params:
-              args.params && typeof args.params === "object"
-                ? (args.params as Record<string, unknown>)
-                : undefined,
-            limit: typeof args.limit === "number" ? args.limit : undefined,
-          },
-          { graphKind },
+  // Cypher runs against the projection, which knows nothing of this role's
+  // policy and cannot be filtered after the fact once a query aggregates. A role
+  // with hidden node types therefore gets no `graph_query` at all — the tools
+  // above answer the same questions within its view.
+  if (!concealing) {
+    add(
+      "graph_query",
+      queryToolDescription(graphKind, view, lang),
+      z.object({
+        cypher: z.string().describe(t.tools.query.cypher),
+        params: z.record(z.string(), z.unknown()).optional().describe(t.tools.query.params),
+        limit: z.number().optional().describe(t.tools.query.limit),
+      }),
+      async (args) =>
+        textResult(
+          await graphQuery(
+            session,
+            {
+              cypher: String(args.cypher),
+              params:
+                args.params && typeof args.params === "object"
+                  ? (args.params as Record<string, unknown>)
+                  : undefined,
+              limit: typeof args.limit === "number" ? args.limit : undefined,
+            },
+            { graphKind },
+          ),
         ),
-      ),
-  );
+    );
+  }
 
   add(
     "graph_history",
@@ -377,15 +517,15 @@ export function buildTools(
       since: z.string().optional(),
       limit: z.number().optional().describe(t.tools.history.limit),
     }),
-    async (args) =>
-      textResult(
-        graphHistory(session, {
-          id: typeof args.id === "string" ? args.id : undefined,
-          actorId: typeof args.actorId === "string" ? args.actorId : undefined,
-          since: typeof args.since === "string" ? args.since : undefined,
-          limit: typeof args.limit === "number" ? args.limit : undefined,
-        }),
-      ),
+    async (args) => {
+      const result = graphHistory(session, {
+        id: typeof args.id === "string" ? visibleId(args.id) : undefined,
+        actorId: typeof args.actorId === "string" ? args.actorId : undefined,
+        since: typeof args.since === "string" ? args.since : undefined,
+        limit: typeof args.limit === "number" ? args.limit : undefined,
+      });
+      return textResult(concealing ? filterHistory(result, session, access) : result);
+    },
   );
 
   add(
@@ -396,14 +536,14 @@ export function buildTools(
       actorId: z.string().optional(),
       limit: z.number().optional().describe(t.tools.changes.limit),
     }),
-    async (args) =>
-      textResult(
-        graphChanges(session, {
-          since: typeof args.since === "string" ? args.since : undefined,
-          actorId: typeof args.actorId === "string" ? args.actorId : undefined,
-          limit: typeof args.limit === "number" ? args.limit : undefined,
-        }),
-      ),
+    async (args) => {
+      const result = graphChanges(session, {
+        since: typeof args.since === "string" ? args.since : undefined,
+        actorId: typeof args.actorId === "string" ? args.actorId : undefined,
+        limit: typeof args.limit === "number" ? args.limit : undefined,
+      });
+      return textResult(concealing ? filterChanges(result, session, access) : result);
+    },
   );
 
   add(
@@ -413,23 +553,32 @@ export function buildTools(
     async () => textResult(graphActors(session)),
   );
 
-  add(
-    "graph_delete_node",
-    t.tools.deleteNode,
-    z.object({ id: z.string() }),
-    async (args) => textResult(await deleteGraphNode(session, { id: String(args.id) })),
-    destructiveWrite,
-  );
+  // A role that may write nothing gets no delete tools at all, rather than two
+  // that always refuse.
+  if (access.anyWritable) {
+    add(
+      "graph_delete_node",
+      t.tools.deleteNode,
+      z.object({ id: z.string() }),
+      async (args) =>
+        textResult(await deleteGraphNode(session, { id: requireWritableNode(String(args.id)) })),
+      destructiveWrite,
+    );
 
-  add(
-    "graph_delete_edge",
-    t.tools.deleteEdge,
-    z.object({ id: z.string() }),
-    async (args) => textResult(await deleteGraphEdge(session, { id: String(args.id) })),
-    destructiveWrite,
-  );
+    add(
+      "graph_delete_edge",
+      t.tools.deleteEdge,
+      z.object({ id: z.string() }),
+      async (args) =>
+        textResult(await deleteGraphEdge(session, { id: requireWritableEdge(String(args.id)) })),
+      destructiveWrite,
+    );
+  }
 
-  for (const [type, def] of Object.entries(schema.nodes)) {
+  for (const [type, def] of Object.entries(view.nodes)) {
+    if (!access.canWrite(type)) {
+      continue;
+    }
     const nodeDesc = resolveI18nString(def.description, lang);
     const nodeGuidelines = resolveGuidelines(def.guidelines, lang);
     const desc = t.tools.upsertNode(type, nodeDesc ?? "", guidelinesBlurb(nodeGuidelines, lang));
@@ -462,7 +611,10 @@ export function buildTools(
     );
   }
 
-  for (const [type, def] of Object.entries(schema.edges)) {
+  for (const [type, def] of Object.entries(view.edges)) {
+    if (!access.canWriteEdge(type)) {
+      continue;
+    }
     const edgeDesc = resolveI18nString(def.description, lang);
     const edgeGuidelines = resolveGuidelines(def.guidelines, lang);
     const desc = t.tools.upsertEdge(
@@ -487,8 +639,8 @@ export function buildTools(
           await upsertGraphEdge(session, {
             type,
             id: typeof id === "string" ? id : undefined,
-            from: asNodeRef(from),
-            to: asNodeRef(to),
+            from: requireWritableRef(asNodeRef(from)),
+            to: requireWritableRef(asNodeRef(to)),
             properties,
           }),
         );
@@ -506,7 +658,16 @@ export function buildTools(
   // Register named tools from policy.named
   if (policy?.named) {
     for (const [name, def] of Object.entries(policy.named)) {
-      const namedTool = buildNamedTool(name, def, schema, session, lang);
+      // A named tool is a shorthand for a write, so it inherits the write rules
+      // of what it writes: no tool for a type this role may not create, and none
+      // for an edge it may not see.
+      if (def.creates && !access.canWrite(def.creates)) {
+        continue;
+      }
+      if (def.into && !access.canWriteEdge(def.into)) {
+        continue;
+      }
+      const namedTool = buildNamedTool(name, def, view, session, lang);
       if (namedTool) {
         tools.push(namedTool);
       }

@@ -226,6 +226,11 @@ tools:                  # (5) what agents can do
       into: IN_COLUMN
   agents:
     - { role: facilitator, actorId: facilitator-bot }
+    - role: summarizer
+      actorId: summarizer-bot
+      nodes:
+        readOnly: [Item]      # reads items, never edits them
+        hidden: [Person]      # summarizes without knowing who is in the room
 
 projection: none        # (6) how it is queried — none | memory | shared
 retention:
@@ -518,9 +523,36 @@ it with:
 - **`agents`** — auto-attached participants. "Every incident room starts with a
   triage agent" is declarative, and the agent joins as a real peer with its own
   `actorId`, appearing in presence and in change attribution like any human.
+- **`agents[].nodes`** — per-role reach over node types, in two independent
+  lists: `readOnly` (visible, unwritable) and `hidden` (not visible at all).
 
 Per-node `guidelines` (already in the schema) becomes the source of the system
 prompt for the workspace's tool surface.
+
+**Decision: two policies, not one permission level.** A single `write: false`
+flag would conflate the two requests people actually make of a shared workspace.
+"The reviewer reads decisions but does not edit them" needs the type to stay in
+the contract, so the model knows what it is looking at and why it cannot change
+it — that is `readOnly`, and `graph_describe` marks it so the refusal is
+predicted rather than discovered. "The outside agent must not learn that the
+legal note exists" needs the opposite: the type struck from the schema view, the
+prompts, the resources and every read, with hidden ids answering `unknown id`
+exactly as absent ids do. A hidden type that leaked through an error message, an
+ambiguous id prefix, or an identity probe would be no policy at all, so
+resolution runs against the filtered snapshot rather than checking results after
+the fact.
+
+Two consequences fall out of taking `hidden` seriously. `graph_query` is not
+offered to a concealing role: Cypher executes in the projection, which has no
+notion of a role, and post-filtering rows cannot undo an aggregate that counted
+hidden ones. And an edge write is treated as touching both endpoints — attaching
+or detaching an edge changes how a node reads to everyone — so a read-only
+endpoint refuses the write, per type where no instance could be written and per
+call where only some could.
+
+This is a policy on the *tool surface*, which is where an agent's whole world
+comes from. It is not transport auth: anything holding the `CollabSession`
+itself is outside it.
 
 Auto-attached agents are the strongest differentiator in this design. A generic
 CRDT library cannot offer them, because it has no concept of a workspace type
@@ -834,6 +866,9 @@ Step 6 is implemented in `@collabnode/mcp` and re-exported by `collabnode`:
 - **Type-specific named tools (§11.2, §14.4)**: `tools.named` declarations generate narrow,
   named tools (e.g. `add_item` with `creates: Item` and `into: IN_COLUMN`), allowing agents
   to create nodes and link them into container hierarchies in a single atomic tool call.
+- **Per-role node policy (§11.2)**: `tools.agents[].nodes.readOnly` / `.hidden`,
+  resolved once per request into a `NodeAccessPolicy` (`@collabnode/schema`) and
+  enforced across tools, prompts, and resources (`@collabnode/mcp`).
 - **Agent role prompts & tool scoping (§11.2)**: `tools.agents` declarations generate
   role-specific MCP prompts (e.g. `agent-facilitator`) and scope available tools to each
   agent's designated capability set.

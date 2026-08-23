@@ -160,6 +160,10 @@ export const EN_CATALOG: McpLocaleCatalog = {
       intoParent: (intoType, toTypes) =>
         `Target parent node id (or unique prefix) to connect into via ${intoType} (${toTypes}).`,
     },
+    policy: {
+      readOnlyNodeType: (type) =>
+        `${type} nodes are read-only for this agent role: they can be read but not created, updated or deleted.`,
+    },
     propertyDescriptions: {
       datetime: "ISO-8601 datetime",
       datetimeWithDesc: (desc) => `${desc} (ISO-8601 datetime)`,
