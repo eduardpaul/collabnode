@@ -230,15 +230,32 @@ function parseSnapshot(value: unknown): GraphSnapshot {
   } as GraphSnapshot;
 }
 
+/** What an upsert tool says it does — one node, or the only node. */
+function upsertNodeDescription(
+  type: string,
+  def: NodeTypeDef,
+  language?: SupportedLanguage | string,
+): string {
+  const t = getLocale(language);
+  const description = resolveI18nString(def.description, language) ?? "";
+  const blurb = formatGuidelinesBlurb(resolveGuidelines(def.guidelines, language), language);
+  return def.singleton
+    ? t.tools.upsertSingletonNode(type, description, blurb)
+    : t.tools.upsertNode(type, description, blurb);
+}
+
 function nodeUpsertInputSchema(
   def: NodeTypeDef,
   tagsEnabled: boolean,
   language?: SupportedLanguage | string,
 ): ZodType {
   const t = getLocale(language);
-  const shape: Record<string, ZodType> = {
-    id: z.string().optional().describe(t.tools.nodeUpsert.id),
-  };
+  const shape: Record<string, ZodType> = {};
+  // A singleton has one node and the runtime knows which: an `id` argument
+  // could only ever be right or wrong, so it is not offered.
+  if (!def.singleton) {
+    shape.id = z.string().optional().describe(t.tools.nodeUpsert.id);
+  }
   if (tagsEnabled) {
     shape.tags = z.array(z.string()).optional().describe(t.tools.nodeUpsert.tags);
   }
@@ -254,6 +271,13 @@ function nodeUpsertInputSchema(
   }
   return z.object(shape).superRefine((data, ctx) => {
     if (typeof data.id === "string") {
+      return;
+    }
+    // Without an `id` argument there is nothing here that says whether this
+    // write creates the singleton or updates it, and demanding every required
+    // property would make partial updates impossible. The runtime still refuses
+    // a create that is missing one — it knows whether the node is there.
+    if (def.singleton) {
       return;
     }
     for (const [propName, prop] of Object.entries(def.properties)) {
@@ -757,9 +781,7 @@ export function buildTools(
     if (!access.canWrite(type)) {
       continue;
     }
-    const nodeDesc = resolveI18nString(def.description, lang);
-    const nodeGuidelines = resolveGuidelines(def.guidelines, lang);
-    const desc = t.tools.upsertNode(type, nodeDesc ?? "", guidelinesBlurb(nodeGuidelines, lang));
+    const desc = upsertNodeDescription(type, def, lang);
 
     add(
       toolName("upsert_node", type),
@@ -882,11 +904,13 @@ function buildNamedTool(
   const shape: Record<string, ZodType> = {};
   const tagsEnabled = schema.config.tags?.enabled === true;
 
-  if (createsType) {
+  // No `id` for a singleton: there is one node of that type and the runtime
+  // knows which, so the argument could only ever be right or wrong.
+  if (createsType && !nodeDef?.singleton) {
     shape.id = z.string().optional().describe(t.tools.namedToolInput.id(createsType));
-    if (tagsEnabled) {
-      shape.tags = z.array(z.string()).optional().describe(t.tools.namedToolInput.tags);
-    }
+  }
+  if (createsType && tagsEnabled) {
+    shape.tags = z.array(z.string()).optional().describe(t.tools.namedToolInput.tags);
   }
 
   const propsToUse = def.properties ?? (nodeDef ? nodeDef.properties : {});
@@ -1137,7 +1161,10 @@ function requiredNodeProperties(
     (nodeType) => toolName("upsert_node", nodeType) === name,
   );
   const def = type ? schema.nodes[type] : undefined;
-  if (!def) {
+  // A singleton's tool is nearly always updating the node rather than making
+  // it, and its arguments carry no id to tell the two apart, so marking every
+  // required property required would forbid touching one field.
+  if (!def || def.singleton) {
     return [];
   }
   return Object.entries(def.properties)

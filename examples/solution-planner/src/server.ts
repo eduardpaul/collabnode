@@ -21,7 +21,6 @@ import {
   getPlannerState,
 } from "./agent/graph.ts";
 import { detectLanguage } from "./agent/llm.ts";
-import { writeSolutionState } from "./agent/state.ts";
 
 loadDotEnv();
 
@@ -278,14 +277,19 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
       }
     }
 
-    await writeSolutionState(ws.session, "server", {
-      appName: "Solution Planner Demo",
-      description: "Initial solution workspace",
-      language: "en",
-      status: "idle",
-      managerAgrees: false,
-      architectAgrees: false,
-      iteration: 0,
+    // `SolutionState` is a singleton in the workspace YAML, so this lands on
+    // the node that is already there rather than adding a second one.
+    await ws.session.upsertNode({
+      type: "SolutionState",
+      properties: {
+        appName: "Solution Planner Demo",
+        description: "Initial solution workspace",
+        language: "en",
+        status: "idle",
+        managerAgrees: false,
+        architectAgrees: false,
+        iteration: 0,
+      },
     });
 
     json(res, { reset: true });

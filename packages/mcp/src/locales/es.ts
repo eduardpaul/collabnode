@@ -30,6 +30,8 @@ export const ES_CATALOG: McpLocaleCatalog = {
     edgeTypesHeader: "## Tipos de arista",
     none: "(ninguno)",
     identityFields: (fields) => `- Campos de identidad: [${fields}] (los valores coincidentes actualizan el nodo existente)`,
+    singleInstance:
+      "- Instancia única: un nodo de este tipo por espacio de trabajo. Escribir en él lo actualiza; nunca hay un segundo y no necesita id.",
     propertiesHeader: "- Propiedades:",
     derivedHeader: "- Derivado (solo lectura, calculado por el servidor; no enviar):",
     guidelinesHeader: "- Directrices:",
@@ -145,6 +147,10 @@ export const ES_CATALOG: McpLocaleCatalog = {
     upsertNode: (type, description, guidelinesBlurb) => {
       const descPart = description ? ` ${description}` : "";
       return `Crea o actualiza un nodo ${type}.${descPart}${guidelinesBlurb}`;
+    },
+    upsertSingletonNode: (type, description, guidelinesBlurb) => {
+      const descPart = description ? ` ${description}` : "";
+      return `Actualiza el nodo ${type}. Hay exactamente uno por espacio de trabajo, creado en la primera escritura, así que esto nunca crea un segundo y no admite id. Envía solo las propiedades que cambias.${descPart}${guidelinesBlurb}`;
     },
     upsertEdge: (type, from, to, description, guidelinesBlurb) => {
       const descPart = description ? ` ${description}` : "";

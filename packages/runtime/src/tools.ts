@@ -173,6 +173,8 @@ export interface GraphDescribeResult {
     {
       description?: I18nString;
       identity?: string[];
+      /** One node of this type per workspace; writes land on it. */
+      singleton?: true;
       properties: Record<string, GraphPropertyContract>;
       guidelines?: I18nStringList;
     }
@@ -567,6 +569,7 @@ export function graphDescribe(session: CollabSession): GraphDescribeResult {
     nodes[type] = {
       description: def.description,
       identity: def.identity?.from,
+      ...(def.singleton ? { singleton: true as const } : {}),
       properties: propertiesContract(def.properties),
       guidelines: def.guidelines,
     };

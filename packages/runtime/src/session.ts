@@ -39,6 +39,7 @@ import {
   generateId,
   identityId,
   lwwProperties,
+  singletonId,
   partitionNodeProperties,
   guidelinesFor,
   type CrdtPropertyType,
@@ -220,7 +221,42 @@ interface UpsertTarget {
   id: string | undefined;
   existing: GraphNodeRecord | undefined;
   /** `normalized` means the stored identity spelling wins over the incoming one. */
-  matchedBy?: "id" | "identity" | "normalized";
+  matchedBy?: "id" | "identity" | "normalized" | "singleton";
+}
+
+/**
+ * Where a write to a `singleton:` type lands.
+ *
+ * Whatever the caller passes, there is one node: the one already there if the
+ * document has one — under the derived id, or under some other id it was
+ * created with before the type became singleton — and otherwise the derived id,
+ * which every replica computes the same way, so two peers creating it at once
+ * write to one node rather than two.
+ *
+ * An explicit id is honoured only when it agrees with that. A caller pointing at
+ * some other node of the type is refused rather than quietly redirected: the
+ * write they described cannot happen, and a silent redirect would hide a bug in
+ * whatever computed the id.
+ */
+function singletonForUpsert(
+  schema: GraphSchema,
+  index: SnapshotIndex,
+  input: UpsertNodeInput,
+): UpsertTarget {
+  const existing = index.singletonOfType(input.type);
+  if (existing) {
+    if (input.id && input.id !== existing.id) {
+      throw new SchemaError(
+        `node type '${input.type}' is a singleton and this workspace already has one ('${existing.id}'); id '${input.id}' refers to something else`,
+        "id",
+      );
+    }
+    return { id: existing.id, existing, matchedBy: "singleton" };
+  }
+  // Nothing there yet. A caller-supplied id is respected — seeding from an
+  // artifact replays the ids it recorded — and the derived id is what a caller
+  // that named none gets.
+  return { id: input.id ?? singletonId(schema, input.type), existing: undefined };
 }
 
 function existingNodeForUpsert(
@@ -228,6 +264,9 @@ function existingNodeForUpsert(
   index: SnapshotIndex,
   input: UpsertNodeInput,
 ): UpsertTarget {
+  if (schema.nodes[input.type]?.singleton) {
+    return singletonForUpsert(schema, index, input);
+  }
   const minted = identityIdFromInput(schema, input.type, input.properties);
   const byId = input.id ? index.node(input.id) : undefined;
   if (minted) {

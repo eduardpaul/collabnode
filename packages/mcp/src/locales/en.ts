@@ -30,6 +30,8 @@ export const EN_CATALOG: McpLocaleCatalog = {
     edgeTypesHeader: "## Edge types",
     none: "(none)",
     identityFields: (fields) => `- Identity fields: [${fields}] (matching values update the existing node)`,
+    singleInstance:
+      "- Single instance: one node of this type per workspace. Writing to it updates it; there is never a second one, and it needs no id.",
     propertiesHeader: "- Properties:",
     derivedHeader: "- Derived (read-only, computed by the server; do not send):",
     guidelinesHeader: "- Guidelines:",
@@ -145,6 +147,10 @@ export const EN_CATALOG: McpLocaleCatalog = {
     upsertNode: (type, description, guidelinesBlurb) => {
       const descPart = description ? ` ${description}` : "";
       return `Create or update a ${type} node.${descPart}${guidelinesBlurb}`;
+    },
+    upsertSingletonNode: (type, description, guidelinesBlurb) => {
+      const descPart = description ? ` ${description}` : "";
+      return `Update the ${type} node. There is exactly one per workspace, created on first write, so this never makes a second one and takes no id. Send only the properties you are changing.${descPart}${guidelinesBlurb}`;
     },
     upsertEdge: (type, from, to, description, guidelinesBlurb) => {
       const descPart = description ? ` ${description}` : "";

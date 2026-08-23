@@ -78,6 +78,37 @@ function formatZod(error: ZodError): SchemaError {
   return new SchemaError(first?.message ?? error.message, path);
 }
 
+/** Every type a template seeds has to exist, and be seedable the way it is used. */
+function assertTemplate(
+  schema: WorkspaceType["schema"],
+  template: NonNullable<WorkspaceType["template"]>,
+): void {
+  for (const [i, node] of (template.nodes ?? []).entries()) {
+    if (!(node.type in schema.nodes)) {
+      throw new SchemaError(
+        `template node references undeclared node type '${node.type}'`,
+        `template.nodes[${i}].type`,
+      );
+    }
+    // Every iteration would land on the same node, so the seed would read as
+    // "one per member" and produce one node holding the last member's values.
+    if (node.forEach && schema.nodes[node.type]?.singleton) {
+      throw new SchemaError(
+        `template node cannot use forEach on singleton node type '${node.type}': every iteration would write to the same node`,
+        `template.nodes[${i}].forEach`,
+      );
+    }
+  }
+  for (const [i, edge] of (template.edges ?? []).entries()) {
+    if (!(edge.type in schema.edges)) {
+      throw new SchemaError(
+        `template edge references undeclared edge type '${edge.type}'`,
+        `template.edges[${i}].type`,
+      );
+    }
+  }
+}
+
 /**
  * Validates consistency of a WorkspaceType against its embedded schema.
  */
@@ -85,24 +116,7 @@ export function validateWorkspaceType(wsType: WorkspaceType): void {
   const { schema, template, lifecycle, tools } = wsType;
 
   if (template) {
-    for (let i = 0; i < (template.nodes ?? []).length; i++) {
-      const node = template.nodes![i]!;
-      if (!(node.type in schema.nodes)) {
-        throw new SchemaError(
-          `template node references undeclared node type '${node.type}'`,
-          `template.nodes[${i}].type`,
-        );
-      }
-    }
-    for (let i = 0; i < (template.edges ?? []).length; i++) {
-      const edge = template.edges![i]!;
-      if (!(edge.type in schema.edges)) {
-        throw new SchemaError(
-          `template edge references undeclared edge type '${edge.type}'`,
-          `template.edges[${i}].type`,
-        );
-      }
-    }
+    assertTemplate(schema, template);
   }
 
   if (lifecycle) {

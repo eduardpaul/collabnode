@@ -19,6 +19,10 @@ schema:
       mode: history
   nodes:
     SolutionState:
+      # One per workspace: this is the state the board *has*, not one of the
+      # things it contains. Every write lands on the same node, whoever makes
+      # it, so the agents can update the status without carrying an id around.
+      singleton: true
       description:
         en: High-level solution planning state and consensus tracking
         es: Estado de planificación de la solución y seguimiento de consenso

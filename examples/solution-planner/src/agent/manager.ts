@@ -2,7 +2,6 @@ import type { CollabSession } from "@collabnode/runtime";
 import type { PlannerState, AgentLog } from "./types.ts";
 import { getChatModel } from "./llm.ts";
 import { extractJson } from "./json.ts";
-import { writeSolutionState } from "./state.ts";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 
 export async function runManagerStep(
@@ -273,16 +272,22 @@ Respond in JSON with this structure:
     );
 
     // Update solution state in collabnode
-    await writeSolutionState(session, "ai-manager", {
-      appName: state.description.slice(0, 40) || "Solution",
-      description: state.description,
-      language: state.language,
-      status: "waiting_user_validation",
-      managerAgrees: false,
-      architectAgrees: state.architectAgrees,
-      iteration,
-      pendingAssumptionId: assumptionId,
-    });
+    await session.upsertNode(
+      {
+        type: "SolutionState",
+        properties: {
+          appName: state.description.slice(0, 40) || "Solution",
+          description: state.description,
+          language: state.language,
+          status: "waiting_user_validation",
+          managerAgrees: false,
+          architectAgrees: state.architectAgrees,
+          iteration,
+          pendingAssumptionId: assumptionId,
+        },
+      },
+      { actorId: "ai-manager" },
+    );
 
     return {
       iteration,
@@ -304,16 +309,22 @@ Respond in JSON with this structure:
     );
   }
 
-  await writeSolutionState(session, "ai-manager", {
-    appName: state.description.slice(0, 40) || "Solution",
-    description: state.description,
-    language: state.language,
-    status: managerAgrees && state.architectAgrees ? "approved" : "planning",
-    managerAgrees,
-    architectAgrees: state.architectAgrees,
-    iteration,
-    pendingAssumptionId: undefined,
-  });
+  await session.upsertNode(
+    {
+      type: "SolutionState",
+      properties: {
+        appName: state.description.slice(0, 40) || "Solution",
+        description: state.description,
+        language: state.language,
+        status: managerAgrees && state.architectAgrees ? "approved" : "planning",
+        managerAgrees,
+        architectAgrees: state.architectAgrees,
+        iteration,
+        pendingAssumptionId: undefined,
+      },
+    },
+    { actorId: "ai-manager" },
+  );
 
   return {
     iteration,

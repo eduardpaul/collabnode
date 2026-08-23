@@ -73,7 +73,7 @@ export {
   type ArithmeticExpr,
   type Expr,
 } from "./expr.js";
-export { generateId, identityId, ulid } from "./identity.js";
+export { generateId, identityId, singletonId, ulid } from "./identity.js";
 export { canonicalJson, sha256Canonical, sha256Hex } from "./hash.js";
 export { compileTemplate, validateParams } from "./template.js";
 export {

@@ -27,6 +27,12 @@ export class SnapshotIndex {
   private readonly edges = new Map<string, GraphEdgeRecord>();
   /** Squashed identity values -> nodes sharing them. Several means "cannot tell". */
   private readonly normalized = new Map<string, GraphNodeRecord[]>();
+  /**
+   * Singleton type -> the node standing in for it, if the document already has
+   * one. Only types declared `singleton:` are tracked, so this stays a handful
+   * of entries rather than an index of the whole graph.
+   */
+  private readonly singletons = new Map<string, GraphNodeRecord>();
   /** type + endpoints -> edge, so an edge is not duplicated per re-run. */
   private readonly byEndpoints = new Map<string, GraphEdgeRecord>();
 
@@ -64,6 +70,18 @@ export class SnapshotIndex {
     return matches?.length === 1 ? matches[0] : undefined;
   }
 
+  /**
+   * The node a `singleton:` type already has, whatever its id.
+   *
+   * Normally that is the derived id, but a document written before the type was
+   * declared singleton — or seeded from an artifact — holds one under some other
+   * id, and adopting it is what keeps the next write an update instead of a
+   * second node.
+   */
+  singletonOfType(type: string): GraphNodeRecord | undefined {
+    return this.singletons.get(type);
+  }
+
   edgeByEndpoints(type: string, from: string, to: string): GraphEdgeRecord | undefined {
     const direct = this.byEndpoints.get(endpointKey(type, from, to));
     if (direct) {
@@ -99,6 +117,9 @@ export class SnapshotIndex {
         if (existing) {
           this.removeNormalized(existing);
           this.nodes.delete(op.id);
+          if (this.singletons.get(existing.type)?.id === op.id) {
+            this.singletons.delete(existing.type);
+          }
         }
         for (const [id, edge] of this.edges) {
           if (edge.from === op.id || edge.to === op.id) {
@@ -131,6 +152,15 @@ export class SnapshotIndex {
 
   private addNode(node: GraphNodeRecord): void {
     this.nodes.set(node.id, node);
+    if (this.schema.nodes[node.type]?.singleton) {
+      const current = this.singletons.get(node.type);
+      // First one wins, and stays won: adopting the earliest node is what makes
+      // the type single. Re-adding the same id refreshes it, so a later write in
+      // the same batch merges against its own earlier one.
+      if (!current || current.id === node.id) {
+        this.singletons.set(node.type, node);
+      }
+    }
     const key = this.normalizedKey(node.type, node.properties);
     if (key === undefined) {
       return;

@@ -176,31 +176,46 @@ export function normalizePropertyMap(
   );
 }
 
+/**
+ * How a node type says which node a write means: by the values of some of its
+ * properties, or by there being only one of it. Never both — identity is how a
+ * type with many instances tells them apart, and a singleton has none to tell
+ * apart, so a type declaring both has not decided what it is.
+ */
+function assertNodeIdentity(name: string, node: RawSchema["nodes"][string]): void {
+  if (node.singleton && node.identity) {
+    throw new SchemaError(
+      `node type '${name}' is both singleton and identity-keyed. Identity is how many instances of a type are told apart; a type with one instance has nothing to tell apart.`,
+      `nodes.${name}.singleton`,
+    );
+  }
+  for (const field of node.identity?.from ?? []) {
+    const property = node.properties[field];
+    if (!property) {
+      throw new SchemaError(
+        `identity field '${field}' is not a property of node type '${name}'`,
+        `nodes.${name}.identity.from`,
+      );
+    }
+    if (isCrdtPropertyType(property.type)) {
+      throw new SchemaError(
+        `identity field '${field}' cannot be a ${property.type} property`,
+        `nodes.${name}.identity.from`,
+      );
+    }
+  }
+}
+
 function normalize(raw: RawSchema): Omit<GraphSchema, "schemaHash"> {
   const nodes: Record<string, NodeTypeDef> = {};
   for (const [name, node] of Object.entries(raw.nodes)) {
     assertPropertyMap(node.properties, `nodes.${name}.properties`);
     assertDerivedExpressions(node.properties, `nodes.${name}.properties`);
-    if (node.identity) {
-      for (const field of node.identity.from) {
-        const property = node.properties[field];
-        if (!property) {
-          throw new SchemaError(
-            `identity field '${field}' is not a property of node type '${name}'`,
-            `nodes.${name}.identity.from`,
-          );
-        }
-        if (isCrdtPropertyType(property.type)) {
-          throw new SchemaError(
-            `identity field '${field}' cannot be a ${property.type} property`,
-            `nodes.${name}.identity.from`,
-          );
-        }
-      }
-    }
+    assertNodeIdentity(name, node);
     nodes[name] = {
       description: node.description,
       identity: node.identity,
+      ...(node.singleton ? { singleton: true } : {}),
       properties: normalizePropertyMap(node.properties, node.identity?.from ?? []),
       ui: node.ui,
       guidelines: node.guidelines,

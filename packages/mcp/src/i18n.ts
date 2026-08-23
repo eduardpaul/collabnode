@@ -82,6 +82,9 @@ export function formatNodeContract(
   if (desc) {
     lines.push(desc);
   }
+  if (def.singleton) {
+    lines.push(t.prompts.singleInstance);
+  }
   if (def.identity?.from.length) {
     lines.push(t.prompts.identityFields(def.identity.from.join(", ")));
   }

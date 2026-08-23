@@ -251,6 +251,45 @@ session.collabText(noteId, "body");
 
 See `examples/voice-board`. Fluid documents created before this container schema (`graph` + `collab` SharedTrees) cannot be joined; create a new room.
 
+## Node identity (`identity:` / `singleton:`)
+
+Two ways a write finds the node it means, so callers do not have to carry ids
+around.
+
+`identity: { from: [...] }` keys a type by the values of some of its properties:
+an upsert with matching values updates that node instead of creating another,
+and near-misses in case, accent or punctuation land on it too.
+
+`singleton: true` is for the state a workspace *has* rather than the things it
+*contains* — a status node, a settings node, a board's configuration:
+
+```yaml
+nodes:
+  BoardState:
+    singleton: true          # one per workspace; no identity fields to key on
+    properties:
+      status: { type: enum, values: [idle, planning, approved], default: idle }
+      owner:  { type: string, required: true }
+```
+
+```ts
+await session.upsertNode({ type: "BoardState", properties: { owner: "ada" } });
+// …anywhere else, without an id, and without reading first:
+await session.upsertNode({ type: "BoardState", properties: { status: "planning" } });
+```
+
+Both land on one node. Its id is derived from the schema and the type name, so
+two replicas writing before either has seen the other converge on that node
+rather than each minting a random id — and a node created under some other id
+before the type was declared singleton is adopted instead of duplicated.
+
+The tools follow: `upsert_node_BoardState` takes no `id` argument, its
+description says there is only one, and `graph_describe` reports `singleton`.
+Required properties are still enforced when the node is first created and left
+alone after, so an agent can set one field without restating the rest. The two
+are mutually exclusive — identity is how a type has many instances told apart,
+and a singleton has none to tell apart.
+
 ## Search (`search:` / `vector:`)
 
 `graph_search` is answered by the graph store's own indexes, not by a scan. Properties opt in per type:

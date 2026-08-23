@@ -26,6 +26,7 @@ export interface McpLocaleCatalog {
     edgeTypesHeader: string;
     none: string;
     identityFields: (fields: string) => string;
+    singleInstance: string;
     propertiesHeader: string;
     derivedHeader: string;
     guidelinesHeader: string;
@@ -107,6 +108,7 @@ export interface McpLocaleCatalog {
       previousSnapshot: string;
     };
     upsertNode: (type: string, description: string, guidelinesBlurb: string) => string;
+    upsertSingletonNode: (type: string, description: string, guidelinesBlurb: string) => string;
     upsertEdge: (
       type: string,
       from: string,
