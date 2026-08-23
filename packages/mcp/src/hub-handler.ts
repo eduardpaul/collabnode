@@ -2,7 +2,7 @@ import { createServer, type Server as HttpServer } from "node:http";
 import type { Hub, Workspace } from "@collabnode/hub";
 import type { CollabSession } from "@collabnode/runtime";
 import type { WorkspaceType } from "@collabnode/schema";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
+import { createMcpHandler, type McpHttpHandler } from "@modelcontextprotocol/server";
 import { readBody, toWebRequest, writeWebResponse } from "./http.js";
 import type { SupportedLanguage } from "./i18n.js";
 import { createWorkspaceMcpServer } from "./server.js";
@@ -26,21 +26,99 @@ export interface HubMcpHandlerOptions {
   languageFrom?: (req: Request, workspaceId: string) => string | undefined;
 }
 
+/** What `createWorkspaceMcpServer` accepts: a live workspace, or a session bound to an actor. */
+type McpTarget =
+  | Workspace
+  | { session: CollabSession; type?: WorkspaceType; id?: string };
+
+interface ResolvedRequest {
+  target: McpTarget;
+  agentRole: string | undefined;
+  language: string | undefined;
+}
+
 /**
- * Creates a Web Standard HTTP request handler that routes MCP requests scoped by path:
+ * Creates a Web Standard MCP handler that routes requests scoped by path:
  * `/mcp/w/:workspaceId` (or `${mount}/w/:workspaceId`).
  *
- * Scopes MCP tool surfaces per-workspace entirely at the transport and auth layer,
- * so the AI agent context never receives workspace IDs as arguments (§11.1).
+ * Scopes MCP tool surfaces per-workspace entirely at the transport and auth
+ * layer, so the AI agent context never receives workspace IDs as arguments
+ * (§11.1).
+ *
+ * Serving is `createMcpHandler` — the same entry the single-document handler
+ * uses — rather than a hand-rolled transport. That is what makes a session work
+ * past `initialize`: the SDK owns instance lifetime and era routing, so a 2025
+ * client's follow-up requests are answered by the stateless fallback instead of
+ * landing on a transport that has never seen an `initialize`.
  */
 export function createHubMcpHandler(
   hub: Hub,
   options: HubMcpHandlerOptions = {},
-): (req: Request) => Promise<Response> {
+): McpHttpHandler {
   const mount = (options.mount ?? "/mcp").replace(/\/+$/, "");
   const pattern = new RegExp(`^${mount}/w/([^/]+)(?:/(.*))?$`);
 
-  return async (req: Request): Promise<Response> => {
+  /**
+   * Resolution is done in `fetch`, because an unknown workspace has to become a
+   * 404 before any server is constructed, and handed to the factory here.
+   * Keyed weakly on the request so nothing outlives the exchange, with a
+   * re-resolve as the fallback: the SDK is free to hand the factory a clone of
+   * the request rather than the object `fetch` was given.
+   */
+  const inFlight = new WeakMap<Request, ResolvedRequest>();
+
+  const resolve = async (req: Request): Promise<ResolvedRequest | undefined> => {
+    const url = new URL(req.url);
+    const workspaceId = url.pathname.match(pattern)?.[1];
+    if (!workspaceId) {
+      return undefined;
+    }
+    const ws = await openWorkspace(hub, workspaceId, options);
+    if (!ws) {
+      return undefined;
+    }
+
+    const actorId = options.actorFrom?.(req, workspaceId);
+    const agentRole =
+      options.agentRoleFrom?.(req, workspaceId) ??
+      url.searchParams.get("role") ??
+      undefined;
+    const language =
+      options.languageFrom?.(req, workspaceId) ??
+      url.searchParams.get("lang") ??
+      url.searchParams.get("language") ??
+      req.headers.get("accept-language") ??
+      options.language;
+
+    const target: McpTarget =
+      actorId && ws.session.schema.config.changeTracking.enabled
+        ? { session: ws.session.runAs(actorId), type: ws.type, id: ws.id }
+        : ws;
+
+    return { target, agentRole, language };
+  };
+
+  const inner = createMcpHandler(async (ctx) => {
+    const req = ctx.requestInfo;
+    if (!req) {
+      throw new Error(
+        "createHubMcpHandler serves HTTP only: the workspace is taken from the request path, and there is no path without a request.",
+      );
+    }
+    const entry = inFlight.get(req) ?? (await resolve(req));
+    if (!entry) {
+      // `fetch` already refused unknown workspaces, so reaching here means the
+      // workspace ended between that check and this construction.
+      throw new Error(`Workspace for '${new URL(req.url).pathname}' is no longer available`);
+    }
+    return createWorkspaceMcpServer(entry.target, {
+      graphKind: options.graphKind,
+      agentRole: entry.agentRole,
+      language: entry.language,
+    });
+  });
+
+  const fetch: McpHttpHandler["fetch"] = async (req, requestOptions) => {
     const url = new URL(req.url);
     const match = url.pathname.match(pattern);
     if (!match) {
@@ -50,66 +128,49 @@ export function createHubMcpHandler(
       );
     }
 
-    const workspaceId = match[1]!;
-    let ws: Workspace | undefined = hub.getLiveWorkspace(workspaceId);
-    if (!ws) {
-      const record = await hub.registry.get(workspaceId);
-      if (record && (record.state === "active" || record.state === "seeding")) {
-        ws = await hub.open(record.typeName, {
-          id: workspaceId,
-          params: record.params,
-        });
-      } else if (options.autoOpenType) {
-        ws = await hub.open(options.autoOpenType, {
-          id: workspaceId,
-          params: options.defaultParams,
-        });
-      } else {
-        return new Response(
-          `Workspace '${workspaceId}' not found. Open it first or configure autoOpenType.`,
-          { status: 404 },
-        );
-      }
+    const entry = await resolve(req);
+    if (!entry) {
+      return new Response(
+        `Workspace '${match[1]}' not found. Open it first or configure autoOpenType.`,
+        { status: 404 },
+      );
     }
+    inFlight.set(req, entry);
 
-    const actorId = options.actorFrom?.(req, workspaceId);
-    const agentRole =
-      options.agentRoleFrom?.(req, workspaceId) ??
-      url.searchParams.get("role") ??
-      undefined;
-
-    const language =
-      options.languageFrom?.(req, workspaceId) ??
-      url.searchParams.get("lang") ??
-      url.searchParams.get("language") ??
-      req.headers.get("accept-language") ??
-      options.language;
-
-    let target:
-      | Workspace
-      | { session: CollabSession; type?: WorkspaceType; id?: string } = ws;
-
-    if (actorId && ws.session.schema.config.changeTracking.enabled) {
-      const boundSession = ws.session.runAs(actorId);
-      target = {
-        session: boundSession,
-        type: ws.type,
-        id: ws.id,
-      };
-    }
-
-    const server = createWorkspaceMcpServer(target, {
-      graphKind: options.graphKind,
-      agentRole,
-      language,
-    });
-
-    const transport = new WebStandardStreamableHTTPServerTransport({
-      sessionIdGenerator: () => crypto.randomUUID(),
-    });
-    await server.connect(transport);
-    return transport.handleRequest(req);
+    return requestOptions === undefined
+      ? inner.fetch(req)
+      : inner.fetch(req, requestOptions);
   };
+
+  return {
+    fetch,
+    close: () => inner.close(),
+    notify: inner.notify,
+    bus: inner.bus,
+  };
+}
+
+/** The live workspace for `workspaceId`, joining or auto-opening as configured. */
+async function openWorkspace(
+  hub: Hub,
+  workspaceId: string,
+  options: HubMcpHandlerOptions,
+): Promise<Workspace | undefined> {
+  const live = hub.getLiveWorkspace(workspaceId);
+  if (live) {
+    return live;
+  }
+  const record = await hub.registry.get(workspaceId);
+  if (record && (record.state === "active" || record.state === "seeding")) {
+    return hub.open(record.typeName, { id: workspaceId, params: record.params });
+  }
+  if (options.autoOpenType) {
+    return hub.open(options.autoOpenType, {
+      id: workspaceId,
+      params: options.defaultParams,
+    });
+  }
+  return undefined;
 }
 
 /**
@@ -129,7 +190,7 @@ export async function serveHubMcpHttp(
       try {
         const body = await readBody(req);
         const request = toWebRequest(req, body);
-        const response = await handler(request);
+        const response = await handler.fetch(request);
         await writeWebResponse(res, response);
       } catch (error) {
         if (!res.headersSent) {
@@ -154,6 +215,7 @@ export async function serveHubMcpHttp(
       await new Promise<void>((resolve, reject) => {
         httpServer.close((error) => (error ? reject(error) : resolve()));
       });
+      await handler.close();
     },
   };
 }

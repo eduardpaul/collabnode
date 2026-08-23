@@ -1,4 +1,5 @@
 import {
+  createFluidTokenHandler,
   createHub,
   loadWorkspaceTypeFile,
   createHubMcpHandler,
@@ -10,12 +11,14 @@ import {
   writeWebResponse,
   type EmbeddingsKind,
 } from "collabnode";
+import { createRedisClient, redisRegistry } from "@collabnode/redis";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer as createViteServer } from "vite";
+import { redisBoardNames } from "./board-names.ts";
 import { BoardDirectory, UnknownBoardTypeError, type HubWorkspace } from "./boards.ts";
-import { loadDotEnv, voiceLiveConfig } from "./env.ts";
+import { azureFluidConfig, loadDotEnv, redisPrefix, redisUrl, voiceLiveConfig } from "./env.ts";
 import { strings, uiLanguage } from "./i18n.ts";
 import { VoiceCall, type CallLog } from "./voice-live.ts";
 import { voiceToolset } from "./voice-tools.ts";
@@ -24,7 +27,15 @@ loadDotEnv();
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const port = Number(process.env.VOICE_BOARD_PORT ?? 4175);
-const collabKind = process.env.COLLAB_BACKEND === "hocuspocus" ? "hocuspocus" : "fluid";
+
+/**
+ * Both hosted services are read before anything else starts. Missing
+ * configuration is a boot failure here, not a board that silently comes up on
+ * an in-process backend nobody else can reach.
+ */
+const fluid = azureFluidConfig();
+const redisConnection = redisUrl();
+const prefix = redisPrefix();
 /** Language used when a request does not ask for one. `VOICE_BOARD_LANG=es` flips the default. */
 const defaultLanguage = uiLanguage(process.env.VOICE_BOARD_LANG);
 
@@ -50,18 +61,55 @@ async function localEmbeddingsIfInstalled(): Promise<EmbeddingsKind> {
 
 const embeddings = openEmbeddings(await localEmbeddingsIfInstalled());
 
-// Start the collab relay server (e.g. Tinylicious for Fluid or Hocuspocus for Yjs)
+/**
+ * Azure Fluid Relay, not Tinylicious: nothing is spawned locally, and
+ * `close()` has nothing to stop. `openCollab` mints this process's tokens from
+ * AZURE_FLUID_KEY — the key stays here, and browsers get per-document tokens
+ * from /api/fluid/token below.
+ */
 const { backend: collabBackend, join: collabJoin, close: closeCollab } = await openCollab(
-  { kind: collabKind },
+  { kind: "fluid", relay: "azure" },
   "server",
 );
 
-// Initialize Hub with the active collaborative backend
-// No `graph`: both board types declare `projection: memory`, so each board gets
-// its own in-memory store. A hub-level `graph` is for `projection: shared`, and
-// it takes a GraphStore instance rather than a descriptor.
+/**
+ * One Redis connection, two jobs: the workspace registry the Hub leases and
+ * reaps through, and the board names the homepage shows. Sharing the client
+ * keeps this to a single TLS connection per replica.
+ */
+const redis = await createRedisClient(redisConnection);
+const registry = await redisRegistry({ client: redis, prefix });
+
+// One read, before anything depends on it. Without this the first symptom of an
+// unreachable cache is an ioredis retry error three hops inside `hub.open()`,
+// which reads as a bug in the Hub rather than as a firewall rule.
+try {
+  await registry.list({ state: "active" });
+} catch (error) {
+  throw new Error(
+    `Cannot reach Redis at ${redisHost(redisConnection)}: ` +
+      `${error instanceof Error ? error.message : String(error)} ` +
+      "Check the access key, and that this host is allowed by the cache's firewall " +
+      "(Azure Managed Redis blocks everything until you add a rule).",
+  );
+}
+
+/**
+ * The registry is what makes a second replica possible: leases, records, and
+ * the reaper's view of what is due all live in Redis rather than in this
+ * process, so `hub.open()` stays idempotent across hosts.
+ *
+ * `sweepIntervalMs: 0` leaves the reaper timer off; with more than one replica
+ * exactly one of them should drive `hub.sweep()`, from a cron or a leader
+ * election, rather than all of them racing.
+ *
+ * No `graph`: both board types declare `projection: memory`, so each board gets
+ * its own in-memory store. A hub-level `graph` is for `projection: shared`, and
+ * it takes a GraphStore instance rather than a descriptor.
+ */
 const hub = await createHub({
   collab: collabBackend,
+  registry,
   embeddings,
   sweepIntervalMs: 0,
 });
@@ -77,7 +125,10 @@ hub.define(c4ArchitectureType);
  * Boards are opened on demand from the homepage rather than fixed at boot, so
  * the directory — not a `const` per workspace — is what the routes below read.
  */
-const boards = new BoardDirectory(hub, { mcpBase: "/mcp" });
+const boards = new BoardDirectory(hub, {
+  mcpBase: "/mcp",
+  names: redisBoardNames(redis, prefix),
+});
 
 /**
  * Two boards still come up seeded, one of each type. They are only a starting
@@ -115,6 +166,34 @@ const mcpHandler = createHubMcpHandler(hub, {
 });
 const config = voiceLiveConfig(defaultLanguage);
 
+/**
+ * Fluid tokens for browser peers.
+ *
+ * The tenant key opens every document in the tenant, so it stays in this
+ * process and each browser gets a token scoped to one document instead.
+ * `authorize` is what makes that scoping mean something: without it the route
+ * would mint a writable token for whatever `documentId` the caller typed,
+ * including documents belonging to a different app in the same tenant.
+ *
+ * `?as=` is this sample's stand-in for a login, and it is exactly as
+ * trustworthy as that sounds — a real deployment resolves the user from a
+ * session or a bearer token and checks board membership inside `authorize`.
+ * What the check below does guarantee, spoofed identity or not, is that the
+ * document is one this hub actually opened.
+ */
+const fluidToken = createFluidTokenHandler({
+  tenantId: fluid.tenantId,
+  tenantKey: fluid.key,
+  user: (request) => {
+    const who = new URL(request.url).searchParams.get("as")?.trim();
+    return { id: who || "guest", name: who || "guest" };
+  },
+  authorize: async ({ documentId }) => {
+    const records = await hub.list({ state: "active" });
+    return records.some((record) => record.collabDocId === documentId);
+  },
+});
+
 const calls = new Map<string, VoiceCall>();
 const logStreams = new Set<ServerResponse>();
 
@@ -134,6 +213,8 @@ http.listen(port, "127.0.0.1", () => {
   console.log(`C4 Architecture Model       → http://127.0.0.1:${port}?workspace=c4-architecture-1&as=ada`);
   console.log(`MCP Voice Board Hub         → http://127.0.0.1:${port}/mcp/w/voice-board-1`);
   console.log(`MCP C4 Architecture Hub     → http://127.0.0.1:${port}/mcp/w/c4-architecture-1`);
+  console.log(`Fluid Relay                 → ${fluid.endpoint} (tenant ${fluid.tenantId})`);
+  console.log(`Workspace registry          → ${redisHost(redisConnection)} (prefix ${prefix})`);
   if (!config) {
     console.log("Voice idle                  → set AZURE_VOICE_LIVE_ENDPOINT and AZURE_VOICE_LIVE_API_KEY");
   } else {
@@ -183,6 +264,10 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       return;
     }
 
+    if (await fluidApi(path, req, res)) {
+      return;
+    }
+
     if (await boardApi(path, req, res)) {
       return;
     }
@@ -198,6 +283,16 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       res.end(error instanceof Error ? error.message : String(error));
     }
   }
+}
+
+/** The one route a browser needs before it can join a document on the relay. */
+async function fluidApi(path: string, req: IncomingMessage, res: ServerResponse): Promise<boolean> {
+  if (path !== "/api/fluid/token" || req.method !== "POST") {
+    return false;
+  }
+  const request = toWebRequest(req, await readBody(req));
+  await writeWebResponse(res, await fluidToken(request));
+  return true;
 }
 
 /**
@@ -451,9 +546,22 @@ const shutdown = async () => {
   http.close();
   await vite.close();
   // `hub.close()` closes every live board, however many the homepage opened.
+  // The registry records stay in Redis on purpose: they are what the next
+  // replica reads to find the boards this one was serving.
   await hub.close();
   await closeCollab();
+  await redis.quit?.();
 };
+
+/** Host and port only — the access key is in there and must not reach a log. */
+function redisHost(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return "redis";
+  }
+}
 process.on("SIGINT", () => {
   void shutdown().then(() => process.exit(0));
 });

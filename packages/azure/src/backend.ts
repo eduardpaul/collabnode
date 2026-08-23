@@ -4,6 +4,11 @@ import {
   type FluidCollabBackendOptions,
 } from "@collabnode/fluid";
 import type { IFluidContainer } from "fluid-framework";
+import {
+  signAzureFluidToken,
+  type AzureFluidUser,
+  type AzureTokenOptions,
+} from "./token.js";
 
 export interface AzureTokenResponse {
   jwt: string;
@@ -60,9 +65,23 @@ export class AzureFluidCollabBackend extends FluidCollabBackend {
   }
 }
 
+export interface AzureRelayFromEnvOptions extends AzureTokenOptions {
+  /** Identity stamped into tokens minted from `AZURE_FLUID_KEY`. */
+  user?: AzureFluidUser;
+}
+
+/**
+ * Reads `AZURE_FLUID_TENANT_ID` and `AZURE_FLUID_ENDPOINT`.
+ *
+ * With no `tokenProvider`, it also reads `AZURE_FLUID_KEY` and signs tokens
+ * itself — right for a server process, wrong for anything that runs in a
+ * browser. Browser peers get their tokens from an HTTP route instead; see
+ * `createFluidTokenHandler` in `collabnode`.
+ */
 export function azureRelayFromEnv(
-  tokenProvider: AzureTokenProvider,
+  tokenProvider?: AzureTokenProvider,
   env: NodeJS.ProcessEnv = process.env,
+  options: AzureRelayFromEnvOptions = {},
 ): AzureRelayConfig {
   const tenantId = env.AZURE_FLUID_TENANT_ID;
   const endpoint = env.AZURE_FLUID_ENDPOINT;
@@ -71,41 +90,48 @@ export function azureRelayFromEnv(
       "Azure Fluid Relay requires AZURE_FLUID_TENANT_ID and AZURE_FLUID_ENDPOINT (the relay is provisioned in Azure, not started by this CLI)",
     );
   }
-  return { tenantId, endpoint, tokenProvider };
+
+  const resolved = tokenProvider ?? providerFromEnv(env, options);
+  return { tenantId, endpoint, tokenProvider: resolved };
 }
 
+function providerFromEnv(
+  env: NodeJS.ProcessEnv,
+  options: AzureRelayFromEnvOptions,
+): AzureTokenProvider {
+  const key = env.AZURE_FLUID_KEY;
+  if (!key) {
+    throw new Error(
+      "Azure Fluid Relay requires AZURE_FLUID_KEY to mint tokens, or an explicit tokenProvider",
+    );
+  }
+  const { user, ...tokenOptions } = options;
+  return staticKeyTokenProvider(
+    key,
+    user ?? { id: env.AZURE_FLUID_USER_ID ?? "collabnode", name: env.AZURE_FLUID_USER_NAME },
+    tokenOptions,
+  );
+}
+
+/**
+ * Mints HS256 tokens from the tenant key, on this process, for this user.
+ *
+ * The key is a bearer credential for the whole tenant: whoever holds it can
+ * read and write every document in it. Keep it server-side and hand browsers a
+ * per-document token from a route you control.
+ */
 export function staticKeyTokenProvider(
   key: string,
-  user: { id: string; name?: string },
+  user: AzureFluidUser,
+  options: AzureTokenOptions = {},
 ): AzureTokenProvider {
+  const mint = async (tenantId: string, documentId?: string): Promise<AzureTokenResponse> => ({
+    jwt: signAzureFluidToken({ key, tenantId, documentId, user, ...options }),
+  });
   return {
-    async fetchOrdererToken(tenantId: string, documentId?: string) {
-      return { jwt: encodeDemoJwt(key, tenantId, documentId, user) };
-    },
-    async fetchStorageToken(tenantId: string, documentId?: string) {
-      return { jwt: encodeDemoJwt(key, tenantId, documentId, user) };
-    },
+    fetchOrdererToken: mint,
+    fetchStorageToken: mint,
   };
-}
-
-function encodeDemoJwt(
-  key: string,
-  tenantId: string,
-  documentId: string | undefined,
-  user: { id: string; name?: string },
-): string {
-  const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
-  const payload = Buffer.from(
-    JSON.stringify({
-      documentId,
-      scopes: ["doc:read", "doc:write", "summary:write"],
-      tenantId,
-      user,
-      ver: "1.0",
-      keyHint: key.slice(0, 4),
-    }),
-  ).toString("base64url");
-  return `${header}.${payload}.`;
 }
 
 async function createClient(config: AzureRelayConfig): Promise<AzureClientLike> {

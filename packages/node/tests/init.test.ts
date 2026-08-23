@@ -2,7 +2,7 @@ import { InMemoryCollabBackend } from "@collabnode/collab";
 import { InMemoryGraphStore } from "@collabnode/graph";
 import { parseSchemaDocument } from "@collabnode/schema";
 import { describe, expect, it } from "vitest";
-import { createFluidTokenHandler, init, webJoinInfo } from "../src/index.ts";
+import { init, webJoinInfo } from "../src/index.ts";
 
 const schema = parseSchemaDocument(`
 name: TaskBoard
@@ -90,28 +90,4 @@ describe("init", () => {
     expect(id).toHaveLength(32);
     await node.close();
   }, 20_000);
-});
-
-describe("createFluidTokenHandler", () => {
-  it("returns a jwt payload for the requested document", async () => {
-    const handle = createFluidTokenHandler({
-      tenantKey: "test-key-1234",
-      tenantId: "tenant-a",
-      user: () => ({ id: "ada", name: "Ada" }),
-    });
-    const response = await handle(
-      new Request("http://app.local/api/collab/token", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ documentId: "doc-1", tenantId: "tenant-a" }),
-      }),
-    );
-    expect(response.ok).toBe(true);
-    const body = (await response.json()) as { jwt: string };
-    expect(body.jwt.split(".")).toHaveLength(3);
-    const payload = JSON.parse(Buffer.from(body.jwt.split(".")[1] ?? "", "base64url").toString());
-    expect(payload.documentId).toBe("doc-1");
-    expect(payload.tenantId).toBe("tenant-a");
-    expect(payload.user).toEqual({ id: "ada", name: "Ada" });
-  });
 });

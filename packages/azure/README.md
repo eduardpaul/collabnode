@@ -20,7 +20,13 @@ const backend = new AzureFluidCollabBackend(azureRelayFromEnv());
 
 `azureRelayFromEnv()` reads `AZURE_FLUID_TENANT_ID`, `AZURE_FLUID_ENDPOINT`, and `AZURE_FLUID_KEY`. Azure Fluid Relay is provisioned in Azure — nothing here starts a server.
 
-> **Never ship the tenant key to the browser.** Browser peers should fetch a scoped token from your own endpoint; see `createFluidTokenHandler` in [`collabnode`](https://www.npmjs.com/package/collabnode) and `httpTokenProvider` in [`@collabnode/web`](https://www.npmjs.com/package/@collabnode/web).
+## Tokens
+
+The relay accepts an HS256 JWT signed with the tenant's primary or secondary key, carrying the claims it fixes: `documentId`, `scopes`, `tenantId`, `user`, `iat`, `exp`, `ver`, `jti`. There is no anonymous mode — an unsigned token is rejected at the orderer.
+
+`staticKeyTokenProvider(key, user)` mints those on this process. `signAzureFluidToken` is the same signing, exposed for anyone building their own provider.
+
+> **Never ship the tenant key to the browser.** It is a bearer credential for the whole tenant: whoever holds it can read and write every document in it. Browser peers should fetch a token scoped to one document from your own endpoint; see `createFluidTokenHandler` in [`collabnode`](https://www.npmjs.com/package/collabnode) and `httpTokenProvider` in [`@collabnode/web`](https://www.npmjs.com/package/@collabnode/web).
 
 ## Exports
 
@@ -28,6 +34,7 @@ const backend = new AzureFluidCollabBackend(azureRelayFromEnv());
 - `azureOpen` — container factory for injecting into `FluidCollabBackend`
 - `azureRelayFromEnv`, `AzureRelayConfig` — environment configuration
 - `staticKeyTokenProvider`, `AzureTokenProvider`, `AzureTokenResponse` — server-side token minting
+- `signAzureFluidToken`, `AzureFluidUser`, `AzureFluidScope`, `AzureTokenOptions` — the signing itself
 
 ---
 

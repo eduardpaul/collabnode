@@ -35,6 +35,9 @@
       "path": "packages/hub"
     },
     {
+      "path": "packages/redis"
+    },
+    {
       "path": "packages/mcp"
     },
     {

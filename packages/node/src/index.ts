@@ -8,7 +8,12 @@ export type {
 } from "./options.js";
 export { openCollab, openEmbeddings, type CollabJoin, type OpenedCollab } from "./backends.js";
 export { webJoinInfo, type WebJoinCollab, type WebJoinInfo } from "./join.js";
-export { createFluidTokenHandler, type FluidTokenUser } from "./token.js";
+export {
+  createFluidTokenHandler,
+  type FluidTokenHandlerOptions,
+  type FluidTokenRequest,
+  type FluidTokenUser,
+} from "./token.js";
 export {
   createHub,
   Hub,

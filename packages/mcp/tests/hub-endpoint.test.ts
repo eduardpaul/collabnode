@@ -203,7 +203,7 @@ describe("MCP Hub Endpoint, Policy & Named Tools", () => {
       body: JSON.stringify(initPayload),
     });
 
-    const res = await handler(req);
+    const res = await handler.fetch(req);
 
     expect(res.status).toBe(200);
     const resBody = await parseJsonRpcResponse(res);
@@ -218,7 +218,7 @@ describe("MCP Hub Endpoint, Policy & Named Tools", () => {
       },
       body: JSON.stringify(initPayload),
     });
-    const notFoundRes = await handler(notFoundReq);
+    const notFoundRes = await handler.fetch(notFoundReq);
     expect(notFoundRes.status).toBe(404);
 
     // 3. Request for invalid path returns 404
@@ -226,9 +226,78 @@ describe("MCP Hub Endpoint, Policy & Named Tools", () => {
       method: "POST",
       headers: { "Accept": "application/json, text/event-stream" },
     });
-    const invalidRes = await handler(invalidPathReq);
+    const invalidRes = await handler.fetch(invalidPathReq);
     expect(invalidRes.status).toBe(404);
 
+    await hub.close();
+  });
+
+  it("serves a whole session, not just initialize", async () => {
+    const retroType = parseWorkspaceTypeDocument(RETRO_TYPE_YAML);
+    const hub = await createHub({ sweepIntervalMs: 0 });
+    hub.define(retroType);
+
+    const ws = await hub.open("retro", { id: "retro-session", params: { sprint: 7 } });
+    const column = ws.snapshot().nodes.find((n) => n.type === "Column")!;
+
+    const handler = createHubMcpHandler(hub);
+    const post = (payload: unknown): Promise<Response> =>
+      handler.fetch(
+        new Request("http://127.0.0.1/mcp/w/retro-session", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+          },
+          body: JSON.stringify(payload),
+        }),
+      );
+
+    const init = await post({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "test-client", version: "1.0" },
+      },
+    });
+    expect(init.status).toBe(200);
+
+    // The regression this test exists for: the second request used to land on a
+    // transport that had never seen an initialize, and answered
+    // `Server not initialized` to every method a client actually calls.
+    const listed = await parseJsonRpcResponse(await post({ jsonrpc: "2.0", id: 2, method: "tools/list" }));
+    expect(listed.error).toBeUndefined();
+    const toolNames = listed.result.tools.map((tool: { name: string }) => tool.name);
+    expect(toolNames).toContain("graph_search");
+    expect(toolNames).toContain("add_item");
+
+    const called = await parseJsonRpcResponse(
+      await post({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: {
+          name: "add_item",
+          arguments: { body: "Deploys are still manual", into: column.id },
+        },
+      }),
+    );
+    expect(called.error).toBeUndefined();
+    expect(called.result.isError).toBeFalsy();
+
+    // The call reached the workspace this path names, not a copy of it.
+    const snap = ws.snapshot();
+    expect(snap.nodes.filter((n) => n.type === "Item")).toHaveLength(1);
+    expect(snap.edges).toHaveLength(1);
+
+    const prompts = await parseJsonRpcResponse(await post({ jsonrpc: "2.0", id: 4, method: "prompts/list" }));
+    expect(prompts.error).toBeUndefined();
+    expect(prompts.result.prompts.map((p: { name: string }) => p.name)).toContain("agent-facilitator");
+
+    await handler.close();
     await hub.close();
   });
 
