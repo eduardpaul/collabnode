@@ -1,6 +1,6 @@
 {
   "name": "@collabnode/web",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Browser collab client: join a collabnode graph as a CRDT peer without importing Fluid or Loro.",
   "repository": {
