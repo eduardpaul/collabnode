@@ -18,13 +18,18 @@
   "scripts": {
     "build": "tsc -b",
     "test": "pnpm -r --sort --workspace-concurrency=2 test",
+    "test:ci": "pnpm -r --sort --workspace-concurrency=2 --filter \"./packages/**\" --filter \"!@collabnode/bench\" test",
     "typecheck": "tsc -b --pretty false",
     "collabnode": "node packages/cli/dist/main.js",
     "bench": "node packages/bench/dist/main.js",
     "publish:check": "pnpm -r --filter \"./packages/**\" --filter \"!@collabnode/bench\" exec npm pack --dry-run",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "changeset": "changeset",
+    "version": "changeset version && pnpm install --lockfile-only",
+    "release": "pnpm build && changeset publish"
   },
   "devDependencies": {
+    "@changesets/cli": "^3.0.1",
     "eslint": "^10.9.0",
     "eslint-plugin-sonarjs": "^4.2.0",
     "typescript": "^6.0.3",

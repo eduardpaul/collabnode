@@ -182,8 +182,16 @@ export class Hub {
   }
 
   /**
-   * Mounts a terminated WorkspaceArtifact read-only for review and inspection.
-   * No persistent live document is required.
+   * Mounts a terminated WorkspaceArtifact for review and inspection: a
+   * throwaway in-memory document seeded from the artifact's snapshot, with no
+   * live document and no registry record of its own.
+   *
+   * It is **read-only** and detached. It reports the artifact's id so a UI can
+   * say what it is showing, but the hub state under that id belongs to whatever
+   * is live there now — which may be a new workspace that reused the id. Writes
+   * are refused rather than dropped into a copy nobody will read, and `close()`
+   * touches neither the registry nor the live map. To carry an artifact
+   * forward, open a new workspace with `from: artifact`.
    */
   async reopen(
     artifact: WorkspaceArtifact,
@@ -228,10 +236,10 @@ export class Hub {
       hub: this,
       options: { actorId: options.actorId },
       mcpMount: this.options.mcp?.mount,
+      review: true,
     });
     ws.markActive();
     return ws;
-
   }
 
   async get(id: string): Promise<WorkspaceRecord | undefined> {
@@ -307,7 +315,13 @@ export class Hub {
     if (projection === "memory") {
       store = new InMemoryGraphStore({ embeddings: this.embeddings });
       ownsStore = true;
-    } else if (projection === "shared" && this.graphStore) {
+    } else if (projection === "shared") {
+      if (!this.graphStore) {
+        throw new Error(
+          `WorkspaceType '${type.name}' declares projection: shared, but this hub was created ` +
+            "without a `graph` store. Pass one to createHub(), or set projection to 'memory' or 'none'.",
+        );
+      }
       store = this.graphStore;
       ownsStore = false;
     }

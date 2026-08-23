@@ -44,6 +44,13 @@ export class Workspace {
   readonly hub: Hub;
   readonly options: OpenWorkspaceOptions;
 
+  /**
+   * A review mount of a finished artifact: its document is a throwaway
+   * in-memory copy, and it borrows the artifact's id so it can say what it is
+   * showing. It must therefore touch none of the hub state keyed by that id —
+   * a live workspace may be running under the same id right now.
+   */
+  private readonly review: boolean;
   private _state: WorkspaceState = "seeding";
   private _lastWriteAt: string;
   private _lastActivityAt: string;
@@ -60,6 +67,8 @@ export class Workspace {
     hub: Hub;
     options: OpenWorkspaceOptions;
     mcpMount?: string;
+    /** Mount an ended artifact for reading only; see `review`. */
+    review?: boolean;
   }) {
     this.id = args.id;
     this.type = args.type;
@@ -70,6 +79,7 @@ export class Workspace {
     this.session = args.session;
     this.hub = args.hub;
     this.options = args.options;
+    this.review = args.review ?? false;
 
     const mount = args.mcpMount ?? "/mcp";
     this.mcpUrl = `${mount.replace(/\/+$/, "")}/w/${this.id}`;
@@ -97,11 +107,14 @@ export class Workspace {
     }
 
 
-    // Subscribe to graph changes for predicate evaluation & activity tracking
-    this.session.onChange(() => {
-      this.touchWrite();
-      void this.evaluateEndWhen();
-    });
+    // Subscribe to graph changes for predicate evaluation & activity tracking.
+    // A review has no lifecycle to run: its workspace already ended.
+    if (!this.review) {
+      this.session.onChange(() => {
+        this.touchWrite();
+        void this.evaluateEndWhen();
+      });
+    }
   }
 
   get state(): WorkspaceState {
@@ -275,6 +288,12 @@ export class Workspace {
    * 7. Update registry record and release lease
    */
   async end(reason: EndReason = "explicit"): Promise<WorkspaceArtifact> {
+    if (this.review) {
+      throw new Error(
+        `Workspace ${this.id} is a read-only review and has nothing to end; ` +
+          "its artifact already exists. Use close() to drop the review.",
+      );
+    }
     if (this.endedArtifact) {
       return this.endedArtifact;
     }
@@ -360,6 +379,11 @@ export class Workspace {
    */
   async close(): Promise<void> {
     await this.session.close();
+    if (this.review) {
+      // Nothing of this mount is registered under `id`, and whatever is may
+      // still be live.
+      return;
+    }
     this.touchActivity();
     const existing = await this.hub.registry.get(this.id);
     if (existing && existing.state === "active") {
@@ -413,6 +437,12 @@ export class Workspace {
   }
 
   private assertWritable(): void {
+    if (this.review) {
+      throw new Error(
+        `Workspace ${this.id} is a read-only review of a finished artifact. ` +
+          "Open a new workspace with `from: artifact` to continue from it.",
+      );
+    }
     if (this._state === "ended" || this._state === "ending") {
       throw new Error(`Workspace ${this.id} is ${this._state} and cannot be modified`);
     }

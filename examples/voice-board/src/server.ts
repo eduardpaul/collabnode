@@ -57,9 +57,11 @@ const { backend: collabBackend, join: collabJoin, close: closeCollab } = await o
 );
 
 // Initialize Hub with the active collaborative backend
+// No `graph`: both board types declare `projection: memory`, so each board gets
+// its own in-memory store. A hub-level `graph` is for `projection: shared`, and
+// it takes a GraphStore instance rather than a descriptor.
 const hub = await createHub({
   collab: collabBackend,
-  graph: { kind: "memory" },
   embeddings,
   sweepIntervalMs: 0,
 });

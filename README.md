@@ -1,6 +1,6 @@
 # collabnode
 
-Collaborative graph runtime for Node.js **and the browser**. Describe an application graph in YAML, co-edit the **instance** through a pluggable CRDT backend, project it into a graph store, and expose a schema-driven MCP server.
+Collaborative graph runtime for Node.js **and the browser**. Describe an application graph in YAML, co-edit the **instance** through a pluggable CRDT backend, project it into a graph store, and expose a schema-driven MCP server. Describe a whole *kind* of session instead — its parameters, its starting graph, how long it lives — and the [hub](#workspace-types-and-the-hub) opens, seeds, and retires as many instances of it as you need.
 
 ```
 YAML schema  →  CollabBackend (memory / Fluid / Hocuspocus)  →  GraphStore (memory / Ladybug / Apache AGE)
@@ -93,11 +93,15 @@ Pin `collab.storageDir` (for example `data/tinylicious`) so `documentId`s surviv
 For local REPL / stdio MCP hosts (Cursor, Claude Desktop):
 
 ```bash
-pnpm collabnode validate examples/voice-board/workspaces/voice-board.yaml
-pnpm collabnode serve examples/voice-board/workspaces/voice-board.yaml --backend memory
-pnpm collabnode mcp examples/voice-board/workspaces/voice-board.yaml --backend memory --actor agent-1
-pnpm collabnode ddl examples/voice-board/workspaces/voice-board.yaml --graph age --graph-name voice_board
+pnpm collabnode validate packages/bench/schema.yaml
+pnpm collabnode serve packages/bench/schema.yaml --backend memory
+pnpm collabnode mcp packages/bench/schema.yaml --backend memory --actor agent-1
+pnpm collabnode ddl packages/bench/schema.yaml --graph age --graph-name bench
 ```
+
+The CLI takes a plain **schema** document — one graph, one document. A
+[workspace type](#workspace-types-and-the-hub) (`type:` + `schema:` + `template:`
+…) is rejected by `validate`; those are opened through the hub, not the CLI.
 
 `serve --backend fluid` will try Tinylicious on port 7070 (same as `init({ collab: { kind: "fluid" } })`). Spawned Tinylicious uses a temp snapshot directory unless you pin `collab.storageDir` (for example `data/tinylicious`); winston stays off unless `TINYLICIOUS_LOG_LEVEL` is set. Close leftover browser tabs after a restart — they keep asking for the previous `documentId`. Azure Fluid Relay is a provisioned Azure service — pass `relay: "azure"` / `--relay azure` with env `AZURE_FLUID_TENANT_ID`, `AZURE_FLUID_ENDPOINT`, `AZURE_FLUID_KEY`.
 
@@ -137,6 +141,7 @@ Host apps should depend on **`collabnode`**. Scoped packages are for advanced wi
 | `@collabnode/age` | Apache AGE `GraphStore` (`pg` + Postgres AGE extension) |
 | `@collabnode/embeddings` | Local text embeddings for semantic search (`@huggingface/transformers` optional peer) |
 | `@collabnode/runtime` | `CollabSession` |
+| `@collabnode/hub` | `Hub`: workspace types, idempotent open, lifecycle/reaper, registry, artifacts |
 | `@collabnode/mcp` | Schema-driven MCP server |
 | `@collabnode/cli` | `validate` / `ddl` / `serve` / `mcp` |
 | `@collabnode/bench` | Private: hot-path metrics + users/limits ladders across Fluid/Hocuspocus × Ladybug/AGE |
@@ -270,11 +275,201 @@ config:
 
 Requires `actorId` on `init()`. Stamps `meta.createdBy/At` and `meta.updatedBy/At`.
 
+## Workspace types and the Hub
+
+`init()` is one document with one schema. A host that opens **many** of them — a
+board per meeting, a room per incident, one per customer — describes each kind
+once as a **workspace type** and lets the hub mint, seed, and retire the
+instances. The type is the schema plus everything an instance needs in order to
+exist on its own: the parameters it takes, the graph it starts from, when it
+ends, and what survives it.
+
+```yaml
+# workspaces/retro.yaml
+type: retro
+version: 1
+description: One team retro, from template to artifact.
+
+schema:                        # exactly the document init() loads
+  nodes:
+    Item:
+      identity: { from: [title] }
+      properties:
+        title: { type: string, required: true }
+        column:
+          type: enum
+          values: [went-well, to-improve]
+          default: went-well
+
+params:                        # supplied per instance, at open time
+  team:                        # string | number | boolean | array | object | json
+    type: string
+    required: true
+
+template:                      # seeded once, on the first open of an id
+  nodes:
+    - type: Item
+      as: opener
+      properties:
+        title: "{team} retro"
+
+lifecycle:                     # how it ends with nobody saying so
+  idleTimeout: 30m
+  maxDuration: 4h
+  # endWhen: MATCH (i:Item) RETURN count(i) >= 20
+
+projection: memory             # none | memory | shared
+retention:
+  onEnd: keep                  # delete | keep | archive
+  artifact: required
+```
+
+Template properties interpolate `{param}`. An entry fans out with
+`forEach: members` (`{item}`, `{index}`, renameable via `itemVar` / `indexVar`)
+and is skipped by a falsy `when:`; `as:` names a node so a `template.edges` entry
+can point its `from` / `to` at it.
+
+`tools:` — `expose`, `named`, and per-role `agents` — lives on the same document
+and is covered under [MCP](#mcp-agents). `description`, `guidelines`, `ui.label`,
+`display.title`, and param descriptions all accept a per-language map
+(`en:` / `es:`) instead of a plain string.
+
+```ts
+import { createHub, loadWorkspaceTypeFile, openCollab } from "collabnode";
+
+const { backend, close } = await openCollab(
+  { kind: "fluid", storageDir: "data/tinylicious" },
+  "server",
+);
+
+const hub = await createHub({
+  collab: backend,                 // a CollabBackend; in-memory when omitted
+  onEnd: async (artifact) => archive.put(artifact.id, artifact),
+});
+
+hub.define(await loadWorkspaceTypeFile("workspaces/retro.yaml"));
+
+const ws = await hub.open("retro", {
+  id: "retro-2026-08",             // minted from the type name when omitted
+  params: { team: "Payments" },    // defaults applied, wrong shape rejected
+  actorId: "server",
+});
+
+await ws.upsertNode({ type: "Item", properties: { title: "Deploys got quieter" } });
+
+// shutdown
+await hub.close();   // closes every live workspace; ends none of them
+close();             // stop Tinylicious, if this process spawned it
+```
+
+That is the one-backend-many-documents shape the `init()` note above tells you to
+build by hand, with the lifecycle already attached.
+
+`hub.open()` is **create-or-join on one id**, not two calls. The first caller in
+claims a registry lease, seeds the template, and flips the record to `active`;
+anyone arriving mid-seed waits for that and joins the same document. So a request
+handler can `open()` on every hit without first asking whether the room exists.
+`hub.get(id)` and `hub.list({ state, typeName })` read the registry;
+`hub.getLiveWorkspace(id)` returns only what this process currently holds open.
+
+A `Workspace` forwards the whole `CollabSession` surface — `upsertNode`, `query`,
+`search`, `collabText` — and stamps the activity clock the reaper reads on every
+write. It has no exported name of its own: `Workspace` from `collabnode` is the
+runtime's unrelated type, so annotate with `Awaited<ReturnType<Hub["open"]>>`.
+
+### Ending, and what survives
+
+Four triggers, three of them automatic: `idleTimeout` (no peers **and** no writes
+for that long), `maxDuration` (wall clock since open), `endWhen` (a predicate
+re-evaluated on every change), and `ws.end("explicit")`. The automatic three run
+in a reaper the hub starts for itself; `sweepIntervalMs: 0` turns that timer off
+for a host that would rather drive `hub.sweep()` from cron. Both paths take the
+same registry lease `open()` does, so two replicas cannot reap one workspace
+twice.
+
+Termination is ordered, and the order is the point: drain the projector, capture
+the snapshot, capture history, build the `WorkspaceArtifact`, **await your `onEnd`
+hooks**, then apply `retention.onEnd` — `delete` destroys the document, `keep` /
+`archive` close it. Only then does the registry record flip to `ended`. An
+`onEnd` that persists the artifact has therefore always run before the live copy
+can go away.
+
+```ts
+const artifact = await ws.end("explicit");
+artifact.snapshot;       // nodes + edges as they finished
+artifact.history;        // only when changeTracking is on
+artifact.participants;   // who was in it, human or agent, joined and left
+
+const review = await hub.reopen(artifact);                 // read-only remount, in memory
+const next = await hub.open("retro", { from: artifact });  // seed the next one from it
+```
+
+A review is genuinely read-only and detached: it reports the artifact's id so a
+UI can say what it is showing, but writes are refused rather than dropped into a
+copy nobody reads, and closing it touches neither the registry nor the live
+workspace that may have reused that id. Use `from: artifact` to carry one
+forward.
+
+`ws.close()` is the other exit: this process leaves, the workspace stays alive
+for everyone else. `hub.close()` closes every live workspace without ending any.
+
+### Registry
+
+`memoryRegistry()` is the default, and it is per process — fine for one host,
+wrong for two. Implement `WorkspaceRegistry` (`claim` / `heartbeat` / `release`,
+`get` / `put` / `delete` / `list` / `due`) over Postgres or Redis and the same
+leasing, the same reaper, and the same idempotent `open()` hold across replicas.
+
+### Projection, per type
+
+Most short-lived workspaces are written and read through snapshots and never
+issue a Cypher query, so the store is opt-in per type:
+
+| `projection` | What answers queries | Lifetime |
+| --- | --- | --- |
+| `none` (default) | the CRDT snapshot; no `graph_query` | nothing to clean up |
+| `memory` | a private `InMemoryGraphStore` — `graph_search`, `graph_similar`, and the `MATCH` forms that store answers | dies with the workspace |
+| `shared` | the `graph` store passed to `createHub()` | one pool for all of them |
+
+A type asking for `shared` on a hub created without a `graph` store is refused at
+`open()` rather than quietly downgraded to no projection.
+
+`GraphStore` takes a workspace scope on every call, so `shared` is one store with
+a partition per workspace rather than a `workspace_id` column — caller-written
+Cypher cannot escape a boundary the store never hands it. `InMemoryGraphStore`
+partitions in memory, `AgeGraphStore` gives each workspace its own AGE graph, and
+Ladybug is one workspace per store and refuses a second out loud. `embeddings`
+passed to `createHub()` reaches every `memory` projection.
+
 ## MCP (agents)
 
 Prompts, tools, and resources are generated from the YAML (`graph-system`, `work-on-Task`, `upsert_node_Task`, `collabnode://schema`, …). Restart / re-`init` after schema changes.
 
-Stdio MCP is CLI-only (it owns stdin). In an API process, use `init({ mcp: true })` and mount `handleMcp`, or use `@collabnode/hub` with `createHubMcpHandler` for scoped multi-workspace routing (`/mcp/w/:workspaceId`).
+Stdio MCP is CLI-only (it owns stdin). In an API process, use `init({ mcp: true })`
+and mount `handleMcp`.
+
+### One endpoint, scoped by path
+
+A [hub](#workspace-types-and-the-hub) serves every workspace from a single
+handler, scoped by **path** rather than by a tool argument — so an agent is never
+handed a workspace id it could change:
+
+```ts
+import { createHubMcpHandler } from "collabnode";   // or serveHubMcpHttp(hub, "127.0.0.1:3937")
+
+const mcp = createHubMcpHandler(hub, {
+  mount: "/mcp",                                    // → /mcp/w/:workspaceId
+  autoOpenType: "retro",                            // open on first hit; 404 without it
+  actorFrom: (req) => authenticate(req)?.userId,    // stamps meta.updatedBy
+  agentRoleFrom: (req) => authenticate(req)?.role,  // trusted role, instead of ?role=
+});
+```
+
+The surface is generated per request from that workspace's type: `tools.expose`
+filters it, `tools.named` adds the type's own verbs (`dictate_note`, `add_task`),
+and the caller's role applies the node policy below. `?lang=` / `Accept-Language`
+picks the language for tool descriptions and prompts, falling back through the
+bare subtag (`es-MX` → `es`) to `en`.
 
 ### Per-agent node policy
 
@@ -335,11 +530,23 @@ Dictate notes, track tasks, and collaborate in real-time by voice (Azure Voice L
 pnpm --filter @collabnode/example-voice-board start
 ```
 
-Open http://127.0.0.1:4175?as=ada and http://127.0.0.1:4175?as=chidi. Tap the mic to dictate or edit markdown cards directly.
+Open http://127.0.0.1:4175?as=ada and http://127.0.0.1:4175?as=chidi. The
+homepage lists the live boards and opens new ones; the create form is generated
+from the chosen type's `params:`, the board id is a slug of the name you type,
+and that id is also its MCP mount (`/mcp/w/<board-id>`). Tap the mic to dictate,
+or edit the markdown cards directly. **Delete** runs the hub's termination
+sequence, so `retention.onEnd: keep` hands back a `WorkspaceArtifact` rather than
+dropping the graph.
 
-Supports multiple workspace types:
-- `examples/voice-board/workspaces/voice-board.yaml` (Notes & Tasks)
-- `examples/voice-board/workspaces/c4-architecture.yaml` (C4 Architecture diagrams)
+Two workspace types ship with it, one file each in
+`examples/voice-board/workspaces/`:
+- `voice-board.yaml` — Notes & Tasks
+- `c4-architecture.yaml` — C4 architecture diagrams
+
+A third is a new YAML plus one `hub.define`: its tile, its create form, its voice
+tools, its MCP mount, and its starter graph all follow from the document, and
+neither the server nor the client learns its name. English and Spanish come from
+`en:` / `es:` keys in the same file (`?lang=es`).
 
 ## Publishing
 

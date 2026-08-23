@@ -80,7 +80,17 @@ export interface ReopenOptions {
 }
 
 export interface HubOptions {
-  collab?: CollabBackend | { kind: "memory" } | { kind: "hocuspocus"; url: string };
+  /**
+   * The backend every workspace in this hub opens on. `{ kind: "memory" }` and
+   * omitting it both give an in-process `InMemoryCollabBackend`.
+   *
+   * Anything networked is constructed by the caller and passed in as a
+   * `CollabBackend` — `openCollab()` in `collabnode` resolves the descriptors.
+   * This package deliberately depends on no transport, so a descriptor it
+   * cannot build would have to be silently downgraded to memory, which is
+   * indistinguishable from working until you notice nobody else is there.
+   */
+  collab?: CollabBackend | { kind: "memory" };
   registry?: WorkspaceRegistry;
   graph?: GraphStore;
   embeddings?: EmbeddingProvider;

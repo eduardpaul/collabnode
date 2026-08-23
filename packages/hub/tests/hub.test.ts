@@ -119,4 +119,54 @@ describe("Hub", () => {
     await reviewWs.close();
     await hub.close();
   });
+
+  it("refuses writes to a review, which would land in a copy nobody reads", async () => {
+    const hub = await createHub({ sweepIntervalMs: 0 });
+    hub.define(parseWorkspaceTypeDocument(RETRO_TYPE_YAML));
+
+    const ws = await hub.open("retro", { id: "retro-readonly", params: { sprint: 3, members: [] } });
+    const artifact = await ws.end("explicit");
+
+    const review = await hub.reopen(artifact, { actorId: "auditor" });
+    await expect(
+      review.upsertNode({ type: "Item", properties: { body: "afterthought" } }),
+    ).rejects.toThrow(/read-only review/);
+    await expect(review.end("explicit")).rejects.toThrow(/read-only review/);
+    expect(review.snapshot().nodes).toHaveLength(1);
+
+    await review.close();
+    await hub.close();
+  });
+
+  it("keeps a review detached from the live workspace that reused its id", async () => {
+    const hub = await createHub({ sweepIntervalMs: 0 });
+    hub.define(parseWorkspaceTypeDocument(RETRO_TYPE_YAML));
+
+    // A workspace ends with retention: keep, then the id is opened again.
+    const first = await hub.open("retro", { id: "retro-shared-id", params: { sprint: 1, members: [] } });
+    const artifact = await first.end("explicit");
+    const live = await hub.open("retro", { id: "retro-shared-id", params: { sprint: 2, members: [] } });
+
+    // Reviewing the old artifact must not evict or end the live workspace.
+    const review = await hub.reopen(artifact, { actorId: "auditor" });
+    await review.close();
+
+    expect(hub.getLiveWorkspace("retro-shared-id")).toBe(live);
+    expect((await hub.registry.get("retro-shared-id"))?.state).toBe("active");
+
+    await hub.close();
+  });
+
+  it("refuses projection: shared on a hub with no graph store", async () => {
+    const hub = await createHub({ sweepIntervalMs: 0 });
+    hub.define(
+      parseWorkspaceTypeDocument(RETRO_TYPE_YAML.replace("projection: memory", "projection: shared")),
+    );
+
+    await expect(hub.open("retro", { id: "retro-shared", params: { sprint: 1, members: [] } })).rejects.toThrow(
+      /projection: shared.*without a `graph` store/s,
+    );
+
+    await hub.close();
+  });
 });
