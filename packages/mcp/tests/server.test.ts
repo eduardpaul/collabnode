@@ -3,7 +3,7 @@ import { InMemoryGraphStore } from "@collabnode/graph";
 import { CollabSession } from "@collabnode/runtime";
 import { parseSchemaDocument } from "@collabnode/schema";
 import { describe, expect, it } from "vitest";
-import { buildTools, createGraphMcpServer, generateResources, toolName } from "../src/index.ts";
+import { buildTools, toAgentTools, createGraphMcpServer, generateResources, toolName } from "../src/index.ts";
 
 const schema = parseSchemaDocument(`
 name: TaskBoard
@@ -733,6 +733,33 @@ nodes:
     expect(removed).toMatchObject({ existed: true, cascadedEdges: 1 });
 
     await host.close();
+  });
+
+  it("converts BoundTool[] to in-process AgentTool map via toAgentTools()", async () => {
+    const collab = new InMemoryCollabBackend();
+    const session = await CollabSession.open(undefined, {
+      schema,
+      collab,
+    });
+
+    const bound = buildTools(schema, session, "memory");
+    const agentTools = toAgentTools(bound);
+
+    expect(agentTools.upsert_node_Task).toBeDefined();
+    expect(agentTools.graph_list).toBeDefined();
+    expect(agentTools.graph_apply_batch).toBeDefined();
+    expect(agentTools.graph_diff_since).toBeDefined();
+
+    // Execute in-process tool directly
+    const res = await agentTools.upsert_node_Task.execute({ title: "In-Process Agent Task" });
+    expect(res.id).toBeDefined();
+    expect(res.created).toBe(true);
+
+    const snap = session.snapshot();
+    expect(snap.nodes.length).toBe(1);
+    expect(snap.nodes[0].properties.title).toBe("In-Process Agent Task");
+
+    await session.close();
   });
 });
 

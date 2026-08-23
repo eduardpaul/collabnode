@@ -1,4 +1,4 @@
-import { connect, httpTokenProvider, type WebCollab } from "@collabnode/web";
+import { connect, type WebCollab } from "@collabnode/web";
 import { CollabGraph } from "@collabnode/graph-view";
 import { bindCollabText } from "./bind-text.ts";
 import { startVoice, type VoiceHandle, type VoiceState } from "./voice-client.ts";
@@ -181,31 +181,9 @@ async function connectToBoard(actor: string, wsId: string): Promise<WebCollab & 
     schema: join.schema,
     documentId: join.documentId,
     actorId: actor,
-    collab: withTokenProvider(join.collab, actor),
+    collab: join.collab,
   });
   return Object.assign(webCollab, { typeName: join.typeName });
-}
-
-/**
- * The server describes *which* relay to join; it cannot hand over the means to
- * join it. The tenant key never leaves the server, so the browser fetches a
- * token per document from /api/fluid/token instead — that route is the only
- * place where the key and the question "may this person open this board?" meet.
- *
- * Left alone for every other backend: Tinylicious and Hocuspocus need no token,
- * so a local run of this same app still works by deleting the .env.
- */
-function withTokenProvider(
-  collab: Parameters<typeof connect>[0]["collab"],
-  actor: string,
-): Parameters<typeof connect>[0]["collab"] {
-  if (collab.kind !== "fluid" || collab.relay !== "azure") {
-    return collab;
-  }
-  return {
-    ...collab,
-    tokenProvider: httpTokenProvider(`/api/fluid/token?as=${encodeURIComponent(actor)}`),
-  };
 }
 
 function mount(

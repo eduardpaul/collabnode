@@ -38,6 +38,8 @@ export class Workspace {
   readonly id: string;
   readonly type: WorkspaceType;
   readonly params: Record<string, unknown>;
+  /** What a person called this workspace, when a person named it. */
+  readonly label: string | undefined;
   readonly openedAt: string;
   readonly mcpUrl: string;
   readonly session: CollabSession;
@@ -63,6 +65,8 @@ export class Workspace {
     type: WorkspaceType;
     params: Record<string, unknown>;
     openedAt: string;
+    /** Display name from the registry record, or from this open's options. */
+    label?: string;
     session: CollabSession;
     hub: Hub;
     options: OpenWorkspaceOptions;
@@ -73,6 +77,7 @@ export class Workspace {
     this.id = args.id;
     this.type = args.type;
     this.params = args.params;
+    this.label = args.label ?? args.options.label;
     this.openedAt = args.openedAt;
     this._lastWriteAt = args.openedAt;
     this._lastActivityAt = args.openedAt;
@@ -397,9 +402,19 @@ export class Workspace {
   }
 
 
+  /**
+   * This workspace as a registry record.
+   *
+   * `hub.get()` answers from here for anything live, so what it leaves out is
+   * what a caller silently loses whenever the workspace happens to be open in
+   * this process — which is why `label` and `collabDocId` are on it. Reading a
+   * board's name, or the document a token has to be scoped to, must not depend
+   * on which replica is asked.
+   */
   toRecord(): WorkspaceRecord {
     return {
       id: this.id,
+      ...(this.label ? { label: this.label } : {}),
       typeName: this.type.name,
       version: this.type.version,
       params: this.params,
@@ -407,6 +422,7 @@ export class Workspace {
       openedAt: this.openedAt,
       lastActivityAt: this._lastActivityAt,
       lastWriteAt: this._lastWriteAt,
+      collabDocId: this.session.id,
       endedAt: this.endedArtifact?.endedAt,
       endedBy: this.endedArtifact?.endedBy,
     };

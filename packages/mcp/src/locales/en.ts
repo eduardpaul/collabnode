@@ -30,6 +30,8 @@ export const EN_CATALOG: McpLocaleCatalog = {
     edgeTypesHeader: "## Edge types",
     none: "(none)",
     identityFields: (fields) => `- Identity fields: [${fields}] (matching values update the existing node)`,
+    singleInstance:
+      "- Single instance: one node of this type per workspace. Writing to it updates it; there is never a second one, and it needs no id.",
     propertiesHeader: "- Properties:",
     derivedHeader: "- Derived (read-only, computed by the server; do not send):",
     guidelinesHeader: "- Guidelines:",
@@ -132,9 +134,23 @@ export const EN_CATALOG: McpLocaleCatalog = {
     actors: "List actors who have created or updated nodes/edges on this document (from meta stamps).",
     deleteNode: "Delete a node and its incident edges from the shared graph. Fails if the id does not exist.",
     deleteEdge: "Delete an edge from the shared graph. Fails if the id does not exist.",
+    applyBatch: {
+      description:
+        "Apply several node and edge writes as one atomic batch. Use ref to point an edge at a node created in the same batch. Every operation is subject to the same write rules as the individual tools.",
+      ops: "Operations in order: {op: 'upsertNode', type, ref?, id?, properties?, tags?}, {op: 'upsertEdge', type, from, to, properties?}, {op: 'deleteNode', id}, {op: 'deleteEdge', id}.",
+    },
+    diffSince: {
+      description:
+        "Compare a snapshot you took earlier against the current graph and return what changed, as ops and as readable Markdown.",
+      previousSnapshot: "A GraphSnapshot returned by an earlier graph_snapshot call.",
+    },
     upsertNode: (type, description, guidelinesBlurb) => {
       const descPart = description ? ` ${description}` : "";
       return `Create or update a ${type} node.${descPart}${guidelinesBlurb}`;
+    },
+    upsertSingletonNode: (type, description, guidelinesBlurb) => {
+      const descPart = description ? ` ${description}` : "";
+      return `Update the ${type} node. There is exactly one per workspace, created on first write, so this never makes a second one and takes no id. Send only the properties you are changing.${descPart}${guidelinesBlurb}`;
     },
     upsertEdge: (type, from, to, description, guidelinesBlurb) => {
       const descPart = description ? ` ${description}` : "";
@@ -163,6 +179,10 @@ export const EN_CATALOG: McpLocaleCatalog = {
     policy: {
       readOnlyNodeType: (type) =>
         `${type} nodes are read-only for this agent role: they can be read but not created, updated or deleted.`,
+      readOnlyEdgeType: (type) =>
+        `${type} edges are read-only for this agent role: attaching or detaching one would change how its endpoints read to everyone else.`,
+      unknownBatchOp: (op) =>
+        `Unknown batch operation '${op}'. Use upsertNode, upsertEdge, deleteNode or deleteEdge.`,
     },
     propertyDescriptions: {
       datetime: "ISO-8601 datetime",

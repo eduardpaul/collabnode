@@ -157,6 +157,56 @@ describe("Hub", () => {
     await hub.close();
   });
 
+  it("keeps the label a person gave a workspace, and renames on request", async () => {
+    const hub = await createHub({ sweepIntervalMs: 0 });
+    hub.define(parseWorkspaceTypeDocument(RETRO_TYPE_YAML));
+
+    await hub.open("retro", {
+      id: "retro-labelled",
+      label: "Sprint 42 retro",
+      params: { sprint: 42, members: [] },
+    });
+    expect((await hub.registry.get("retro-labelled"))?.label).toBe("Sprint 42 retro");
+
+    // Joining without a label leaves the name alone: a replica that never saw
+    // the name must not erase it by opening the workspace.
+    hub.removeLiveWorkspace("retro-labelled");
+    await hub.open("retro", { id: "retro-labelled", params: { sprint: 42, members: [] } });
+    expect((await hub.registry.get("retro-labelled"))?.label).toBe("Sprint 42 retro");
+
+    // `hub.get()` answers from the live workspace when there is one, so it has
+    // to agree with the registry about the name — and about which document the
+    // workspace is on, which is what a relay token is scoped to.
+    const live = await hub.get("retro-labelled");
+    expect(live?.label).toBe("Sprint 42 retro");
+    expect(live?.collabDocId).toBe(hub.getLiveWorkspace("retro-labelled")?.session.id);
+
+    hub.removeLiveWorkspace("retro-labelled");
+    await hub.open("retro", {
+      id: "retro-labelled",
+      label: "Sprint 43 retro",
+      params: { sprint: 42, members: [] },
+    });
+    expect((await hub.registry.get("retro-labelled"))?.label).toBe("Sprint 43 retro");
+
+    await hub.close();
+  });
+
+  it("finds a workspace by its collab document, for token authorization", async () => {
+    const hub = await createHub({ sweepIntervalMs: 0 });
+    hub.define(parseWorkspaceTypeDocument(RETRO_TYPE_YAML));
+    const ws = await hub.open("retro", {
+      id: "retro-doc",
+      params: { sprint: 1, members: [] },
+    });
+
+    const found = await hub.registry.findByCollabDocId?.(ws.session.id);
+    expect(found?.id).toBe("retro-doc");
+    expect(await hub.registry.findByCollabDocId?.("not-a-document")).toBeUndefined();
+
+    await hub.close();
+  });
+
   it("refuses projection: shared on a hub with no graph store", async () => {
     const hub = await createHub({ sweepIntervalMs: 0 });
     hub.define(

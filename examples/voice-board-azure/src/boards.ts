@@ -5,11 +5,10 @@ import { resolveI18nString, type Hub, type WorkspaceType } from "collabnode";
  * many as you like, of either type, from the homepage".
  *
  * Everything here is a thin read over the Hub — `hub.open()` already mints,
- * seeds, and leases a workspace, and `hub.registry` already knows which ones
- * are alive. The one thing the Hub has no opinion about is the *name* a person
- * typed into the create form, because a workspace id has to stay URL- and
- * MCP-path-safe. So names live in a side map here, and the id is a slug of the
- * name rather than the name itself.
+ * seeds, and leases a workspace, `hub.registry` already knows which ones are
+ * alive, and the name a person typed rides along on the record as its `label`.
+ * The id is a slug of that name rather than the name itself, because ids have
+ * to stay URL- and MCP-path-safe.
  */
 
 /**
@@ -73,22 +72,6 @@ export interface BoardSummary {
   mcp: string;
 }
 
-/**
- * Where board names live between replicas.
- *
- * The Hub knows a board's id, type, and params; the *name* someone typed is the
- * one thing it has no place for, because ids have to stay URL- and
- * MCP-path-safe. With a single process a Map is enough. With Redis behind the
- * registry and more than one replica, a Map means the board another replica
- * created shows up under its type's default title instead of its name — so the
- * names go next to the records.
- */
-export interface BoardNameStore {
-  get(id: string): Promise<string | undefined>;
-  set(id: string, name: string): Promise<void>;
-  delete(id: string): Promise<void>;
-}
-
 export interface CreateBoardInput {
   typeName: string;
   name?: string;
@@ -106,15 +89,10 @@ export class UnknownBoardTypeError extends Error {
 export class BoardDirectory {
   private readonly hub: Hub;
   private readonly mcpBase: string;
-  /** Board id → the name someone typed. Ids are slugs, so the original is kept here. */
-  private readonly names = new Map<string, string>();
-  /** Shared copy of the same map, when this deployment has more than one replica. */
-  private readonly nameStore: BoardNameStore | undefined;
 
-  constructor(hub: Hub, options: { mcpBase?: string; names?: BoardNameStore } = {}) {
+  constructor(hub: Hub, options: { mcpBase?: string } = {}) {
     this.hub = hub;
     this.mcpBase = (options.mcpBase ?? "/mcp").replace(/\/$/, "");
-    this.nameStore = options.names;
   }
 
   /** The types the homepage offers, with their `params:` as form fields. */
@@ -142,27 +120,14 @@ export class BoardDirectory {
     const id = await this.mintId(type.name, name);
     // `validateParams` inside `hub.open` applies the YAML defaults and rejects
     // the wrong shape, so an empty form still produces a seeded board.
-    const ws = await this.hub.open(type.name, {
+    // `label` is where the typed name lives from here on: it is on the registry
+    // record, so every replica reads the same name without a store of its own.
+    return this.hub.open(type.name, {
       id,
+      label: name,
       actorId: input.actorId ?? "server",
       params: input.params ?? {},
     });
-    this.names.set(ws.id, name);
-    await this.nameStore?.set(ws.id, name);
-    return ws;
-  }
-
-  /**
-   * Registers a board opened elsewhere — the two the server seeds at boot —
-   * so the homepage lists them under the same names the README uses.
-   */
-  adopt(ws: HubWorkspace, name?: string): HubWorkspace {
-    const resolved = name?.trim() || defaultName(ws.type, "en");
-    this.names.set(ws.id, resolved);
-    // Deliberately not awaited: adopt() runs inline at boot, and a slow Redis
-    // should cost a board its remembered name, not the whole startup.
-    void this.nameStore?.set(ws.id, resolved).catch(() => undefined);
-    return ws;
   }
 
   get(id: string): HubWorkspace | undefined {
@@ -173,7 +138,6 @@ export class BoardDirectory {
   /** Every live board, oldest first, so the seeded pair stays at the top. */
   async list(lang: string): Promise<BoardSummary[]> {
     const records = await this.hub.list({ state: "active" });
-    await this.hydrateNames(records.map((record) => record.id));
 
     const summaries: BoardSummary[] = [];
     for (const record of records) {
@@ -190,34 +154,33 @@ export class BoardDirectory {
           continue;
         }
       }
-      summaries.push(this.summarize(ws, lang, record.openedAt));
+      summaries.push(this.summarize(ws, lang, record.openedAt, record.label));
     }
     return summaries.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
-  /** Pull in names for boards this process has not seen before. */
-  private async hydrateNames(ids: string[]): Promise<void> {
-    if (!this.nameStore) {
-      return;
+  /** One board's card, with the name read from its registry record. */
+  async summarizeById(id: string, lang: string): Promise<BoardSummary | undefined> {
+    const ws = this.get(id);
+    if (!ws) {
+      return undefined;
     }
-    const missing = ids.filter((id) => !this.names.has(id));
-    await Promise.all(
-      missing.map(async (id) => {
-        const name = await this.nameStore?.get(id);
-        if (name) {
-          this.names.set(id, name);
-        }
-      }),
-    );
+    const record = await this.hub.get(id);
+    return this.summarize(ws, lang, record?.openedAt ?? ws.openedAt, record?.label);
   }
 
-  summarize(ws: HubWorkspace, lang: string, createdAt = ws.openedAt): BoardSummary {
+  summarize(
+    ws: HubWorkspace,
+    lang: string,
+    createdAt = ws.openedAt,
+    label?: string,
+  ): BoardSummary {
     const snapshot = ws.session.snapshot();
     return {
       id: ws.id,
       typeName: ws.type.name,
       emoji: TYPE_EMOJI[ws.type.name] ?? FALLBACK_EMOJI,
-      name: this.names.get(ws.id) ?? defaultName(ws.type, lang),
+      name: label ?? defaultName(ws.type, lang),
       typeTitle: resolveI18nString(ws.type.schema.config.display?.title, lang) ?? ws.type.name,
       description: resolveI18nString(ws.type.description, lang) ?? "",
       createdAt,
@@ -240,8 +203,6 @@ export class BoardDirectory {
     }
     await ws.end("explicit");
     await this.hub.registry.delete(id);
-    this.names.delete(id);
-    await this.nameStore?.delete(id);
     return true;
   }
 

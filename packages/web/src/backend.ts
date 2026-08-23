@@ -1,8 +1,12 @@
 import type { CollabBackend } from "@collabnode/collab";
 import type { IFluidContainer } from "fluid-framework";
-import type { WebCollabKind } from "./options.js";
+import type { AzureTokenProvider, WebCollabKind } from "./options.js";
+import { httpTokenProvider } from "./token.js";
 
-export async function openWebCollab(collab: WebCollabKind): Promise<CollabBackend> {
+export async function openWebCollab(
+  collab: WebCollabKind,
+  options: { actorId?: string } = {},
+): Promise<CollabBackend> {
   if (collab.kind === "custom") {
     return collab.backend;
   }
@@ -10,9 +14,32 @@ export async function openWebCollab(collab: WebCollabKind): Promise<CollabBacken
     return openHocuspocus(collab);
   }
   if (collab.kind === "fluid" && collab.relay === "azure") {
-    return openAzureFluid(collab);
+    return openAzureFluid(collab, options.actorId);
   }
   return openTinyliciousFluid(collab);
+}
+
+/**
+ * The provider this descriptor asks for. A `tokenEndpoint` becomes an
+ * `httpTokenProvider` here rather than in every app: a join payload can only
+ * ever carry the URL, so turning it into a provider was work every browser was
+ * repeating before it could call `connect()`.
+ */
+function azureTokenProvider(
+  collab: Extract<WebCollabKind, { relay: "azure" }>,
+  actorId: string | undefined,
+): AzureTokenProvider {
+  if (collab.tokenProvider) {
+    return collab.tokenProvider;
+  }
+  if (!collab.tokenEndpoint) {
+    throw new Error(
+      "Azure Fluid Relay needs a tokenEndpoint or a tokenProvider: the relay rejects unsigned tokens, and the tenant key must never reach a browser. Mount a route with createFluidTokenHandler and name it in the join payload.",
+    );
+  }
+  return httpTokenProvider(collab.tokenEndpoint, {
+    ...(actorId !== undefined ? { actorId } : {}),
+  });
 }
 
 async function loadHocuspocus(): Promise<typeof import("@collabnode/hocuspocus")> {
@@ -51,9 +78,10 @@ async function openTinyliciousFluid(collab: WebCollabKind): Promise<CollabBacken
 
 async function openAzureFluid(
   collab: Extract<WebCollabKind, { relay: "azure" }>,
+  actorId: string | undefined,
 ): Promise<CollabBackend> {
   const { FluidCollabBackend, fluidContainerSchema } = await loadFluid();
-  const client = await createAzureClient(collab);
+  const client = await createAzureClient(collab, azureTokenProvider(collab, actorId));
   return new FluidCollabBackend({
     open: {
       create: async () => {
@@ -79,6 +107,7 @@ interface AzureClientLike {
 
 async function createAzureClient(
   collab: Extract<WebCollabKind, { relay: "azure" }>,
+  tokenProvider: AzureTokenProvider,
 ): Promise<AzureClientLike> {
   try {
     const mod = (await import("@fluidframework/azure-client")) as {
@@ -89,7 +118,7 @@ async function createAzureClient(
         type: "remote",
         tenantId: collab.tenantId,
         endpoint: collab.endpoint,
-        tokenProvider: collab.tokenProvider,
+        tokenProvider,
       },
     });
   } catch (error) {

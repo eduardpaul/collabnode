@@ -5,11 +5,10 @@ import { resolveI18nString, type Hub, type WorkspaceType } from "collabnode";
  * many as you like, of either type, from the homepage".
  *
  * Everything here is a thin read over the Hub — `hub.open()` already mints,
- * seeds, and leases a workspace, and `hub.registry` already knows which ones
- * are alive. The one thing the Hub has no opinion about is the *name* a person
- * typed into the create form, because a workspace id has to stay URL- and
- * MCP-path-safe. So names live in a side map here, and the id is a slug of the
- * name rather than the name itself.
+ * seeds, and leases a workspace, `hub.registry` already knows which ones are
+ * alive, and the name a person typed rides along on the record as its `label`.
+ * The id is a slug of that name rather than the name itself, because ids have
+ * to stay URL- and MCP-path-safe.
  */
 
 /**
@@ -90,8 +89,6 @@ export class UnknownBoardTypeError extends Error {
 export class BoardDirectory {
   private readonly hub: Hub;
   private readonly mcpBase: string;
-  /** Board id → the name someone typed. Ids are slugs, so the original is kept here. */
-  private readonly names = new Map<string, string>();
 
   constructor(hub: Hub, options: { mcpBase?: string } = {}) {
     this.hub = hub;
@@ -123,22 +120,14 @@ export class BoardDirectory {
     const id = await this.mintId(type.name, name);
     // `validateParams` inside `hub.open` applies the YAML defaults and rejects
     // the wrong shape, so an empty form still produces a seeded board.
-    const ws = await this.hub.open(type.name, {
+    // `label` is where the typed name lives from here on: it is on the registry
+    // record, so every replica reads the same name without a store of its own.
+    return this.hub.open(type.name, {
       id,
+      label: name,
       actorId: input.actorId ?? "server",
       params: input.params ?? {},
     });
-    this.names.set(ws.id, name);
-    return ws;
-  }
-
-  /**
-   * Registers a board opened elsewhere — the two the server seeds at boot —
-   * so the homepage lists them under the same names the README uses.
-   */
-  adopt(ws: HubWorkspace, name?: string): HubWorkspace {
-    this.names.set(ws.id, name?.trim() || defaultName(ws.type, "en"));
-    return ws;
   }
 
   get(id: string): HubWorkspace | undefined {
@@ -149,24 +138,49 @@ export class BoardDirectory {
   /** Every live board, oldest first, so the seeded pair stays at the top. */
   async list(lang: string): Promise<BoardSummary[]> {
     const records = await this.hub.list({ state: "active" });
+
     const summaries: BoardSummary[] = [];
     for (const record of records) {
-      const ws = this.hub.getLiveWorkspace(record.id);
+      // A board opened on another replica is in the registry but not in this
+      // process, and the card needs live node and edge counts. `hub.open()` is
+      // idempotent and joins the existing document rather than making a second
+      // one, so this is where a replica catches up with its peers.
+      let ws = this.hub.getLiveWorkspace(record.id);
       if (!ws) {
-        continue;
+        try {
+          ws = await this.hub.open(record.typeName, { id: record.id, params: record.params });
+        } catch {
+          // A board mid-termination, or a type this replica does not define.
+          continue;
+        }
       }
-      summaries.push(this.summarize(ws, lang, record.openedAt));
+      summaries.push(this.summarize(ws, lang, record.openedAt, record.label));
     }
     return summaries.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
-  summarize(ws: HubWorkspace, lang: string, createdAt = ws.openedAt): BoardSummary {
+  /** One board's card, with the name read from its registry record. */
+  async summarizeById(id: string, lang: string): Promise<BoardSummary | undefined> {
+    const ws = this.get(id);
+    if (!ws) {
+      return undefined;
+    }
+    const record = await this.hub.get(id);
+    return this.summarize(ws, lang, record?.openedAt ?? ws.openedAt, record?.label);
+  }
+
+  summarize(
+    ws: HubWorkspace,
+    lang: string,
+    createdAt = ws.openedAt,
+    label?: string,
+  ): BoardSummary {
     const snapshot = ws.session.snapshot();
     return {
       id: ws.id,
       typeName: ws.type.name,
       emoji: TYPE_EMOJI[ws.type.name] ?? FALLBACK_EMOJI,
-      name: this.names.get(ws.id) ?? defaultName(ws.type, lang),
+      name: label ?? defaultName(ws.type, lang),
       typeTitle: resolveI18nString(ws.type.schema.config.display?.title, lang) ?? ws.type.name,
       description: resolveI18nString(ws.type.description, lang) ?? "",
       createdAt,
@@ -189,7 +203,6 @@ export class BoardDirectory {
     }
     await ws.end("explicit");
     await this.hub.registry.delete(id);
-    this.names.delete(id);
     return true;
   }
 

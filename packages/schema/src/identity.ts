@@ -118,3 +118,18 @@ export function identityId(
   const material = `${schema.config.schemaId}:${nodeType}:${parts.join("|")}`;
   return sha256Hex(material).slice(0, 32);
 }
+
+/**
+ * The id of a singleton type's one node.
+ *
+ * Derived from the schema and the type name, so it is the same on every replica
+ * and in every process: two peers creating the node at the same moment write to
+ * one id and the CRDT merges them, rather than each minting a random id and the
+ * document ending up with two nodes nothing can tell apart.
+ *
+ * The material carries a marker rather than property values, and a singleton
+ * type cannot be identity-keyed, so this can never collide with `identityId`.
+ */
+export function singletonId(schema: GraphSchema, nodeType: string): string {
+  return sha256Hex(`${schema.config.schemaId}:${nodeType}:\u0000singleton`).slice(0, 32);
+}

@@ -131,6 +131,7 @@ Host apps should depend on **`collabnode`**. Scoped packages are for advanced wi
 | `collabnode` | **`init()`** / **`openCollab()`** + `webJoinInfo` / Fluid token handler |
 | `@collabnode/web` | Browser **`connect()`**, `<collab-change-feed>` |
 | `@collabnode/graph-view` | `<collab-graph>` canvas web component (bundles `vis-network`) |
+| `@collabnode/react` | React hooks: `useCollabJoin`, `useCollab`, snapshot/presence selectors |
 | `@collabnode/schema` | YAML → `GraphSchema` + `schemaHash` |
 | `@collabnode/graph` | `GraphOp`, `GraphStore`, in-memory store |
 | `@collabnode/collab` | `CollabBackend` interface |
@@ -153,13 +154,14 @@ Do not import `AzureClient` / SharedTree in the app. Browsers are CRDT **peers**
 
 ```ts
 import { init, webJoinInfo, createFluidTokenHandler } from "collabnode";
-import { connect, httpTokenProvider } from "@collabnode/web";
+import { connect } from "@collabnode/web";
 
 // Node
 const node = await init({
   schema: new URL("./schema.yaml", import.meta.url),
   actorId: "api",
-  collab: { kind: "fluid", storageDir: "data/tinylicious" }, // or azure / { kind: "hocuspocus" }
+  // Azure: { kind: "fluid", relay: "azure", tokenEndpoint: "/api/collab/token" }
+  collab: { kind: "fluid", storageDir: "data/tinylicious" }, // or { kind: "hocuspocus" }
 });
 // GET  /api/collab/join  → webJoinInfo(node)
 // POST /api/collab/token → createFluidTokenHandler({ tenantKey, user, authorize })  // Azure only
@@ -170,16 +172,17 @@ const client = await connect({
   schema: join.schema,
   documentId: join.documentId,
   actorId: currentUser.id,
-  collab: join.collab.relay === "azure"
-    ? { ...join.collab, tokenProvider: httpTokenProvider("/api/collab/token") }
-    : join.collab,
+  collab: join.collab,
 });
 client.session.onChange((_ops, snapshot) => render(snapshot));
 await client.session.upsertNode({ type: "Task", properties: { title: "Draft Q3 plan" } });
 ```
 
 On Azure, the tenant key is a bearer credential for the whole tenant, so it
-stays on the server and the browser gets a token scoped to one document.
+stays on the server and the browser gets a token scoped to one document. The
+join descriptor names the route (`tokenEndpoint`), and `connect()` fetches from
+it — a URL is not a secret, so the browser needs no wiring of its own.
+
 `authorize` is what makes that scoping mean something — `user()` answers *who is
 asking*, never *what they may open*, and the token is minted for whatever
 `documentId` the request carried:
@@ -187,8 +190,11 @@ asking*, never *what they may open*, and the token is minted for whatever
 ```ts
 createFluidTokenHandler({
   tenantKey: process.env.AZURE_FLUID_KEY,
-  user: (request) => sessionUser(request),
-  authorize: ({ user, documentId }) => mayOpen(user, documentId),
+  user: (request, { actorId }) => sessionUser(request) ?? guest(actorId),
+  // hubDocumentAuthorizer(hub) is the floor: the document must be one this hub
+  // opened. Add who may open which workspace on top of it.
+  authorize: async (context) =>
+    (await hubDocumentAuthorizer(hub)(context)) && mayOpen(context.user, context.documentId),
 });
 ```
 
@@ -244,6 +250,45 @@ session.collabText(noteId, "body");
 ```
 
 See `examples/voice-board`. Fluid documents created before this container schema (`graph` + `collab` SharedTrees) cannot be joined; create a new room.
+
+## Node identity (`identity:` / `singleton:`)
+
+Two ways a write finds the node it means, so callers do not have to carry ids
+around.
+
+`identity: { from: [...] }` keys a type by the values of some of its properties:
+an upsert with matching values updates that node instead of creating another,
+and near-misses in case, accent or punctuation land on it too.
+
+`singleton: true` is for the state a workspace *has* rather than the things it
+*contains* — a status node, a settings node, a board's configuration:
+
+```yaml
+nodes:
+  BoardState:
+    singleton: true          # one per workspace; no identity fields to key on
+    properties:
+      status: { type: enum, values: [idle, planning, approved], default: idle }
+      owner:  { type: string, required: true }
+```
+
+```ts
+await session.upsertNode({ type: "BoardState", properties: { owner: "ada" } });
+// …anywhere else, without an id, and without reading first:
+await session.upsertNode({ type: "BoardState", properties: { status: "planning" } });
+```
+
+Both land on one node. Its id is derived from the schema and the type name, so
+two replicas writing before either has seen the other converge on that node
+rather than each minting a random id — and a node created under some other id
+before the type was declared singleton is adopted instead of duplicated.
+
+The tools follow: `upsert_node_BoardState` takes no `id` argument, its
+description says there is only one, and `graph_describe` reports `singleton`.
+Required properties are still enforced when the node is first created and left
+alone after, so an agent can set one field without restating the rest. The two
+are mutually exclusive — identity is how a type has many instances told apart,
+and a singleton has none to tell apart.
 
 ## Search (`search:` / `vector:`)
 

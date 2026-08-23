@@ -88,6 +88,19 @@ export interface IdentityDef {
 export interface NodeTypeDef {
   description?: I18nString;
   identity?: IdentityDef;
+  /**
+   * At most one node of this type per workspace.
+   *
+   * For the state a workspace *has* rather than the things it *contains* — a
+   * settings node, a status node, a board's configuration. Every write lands on
+   * the same node, whether or not the writer knows its id, and the id is derived
+   * from the type so two replicas creating it at once converge on one node
+   * instead of two.
+   *
+   * Mutually exclusive with `identity`: identity is how a type has many
+   * instances told apart, and a type with one instance has nothing to tell apart.
+   */
+  singleton?: boolean;
   properties: Record<string, PropertyDef>;
   ui?: UiMeta;
   guidelines?: I18nStringList;

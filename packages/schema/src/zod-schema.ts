@@ -294,6 +294,7 @@ const nodeType = z.strictObject({
       from: z.array(z.string().min(1)).min(1),
     })
     .optional(),
+  singleton: z.boolean().optional(),
   properties: z.record(z.string().min(1), propertyDef).default({}),
   ui: uiMeta.optional(),
   guidelines: i18nStringList.optional(),

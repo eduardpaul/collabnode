@@ -62,30 +62,35 @@ two different questions:
 const fluidToken = createFluidTokenHandler({
   tenantId: fluid.tenantId,
   tenantKey: fluid.key,
-  user: (request) => ({ id: whoever(request) }),          // who is asking
-  authorize: async ({ documentId }) => {                  // may they have it
-    const records = await hub.list({ state: "active" });
-    return records.some((record) => record.collabDocId === documentId);
-  },
+  user: (_request, { actorId }) => ({ id: actorId || "guest" }),  // who is asking
+  authorize: hubDocumentAuthorizer(hub),                          // may they have it
 });
 ```
 
 `authorize` is required, and it is the whole point of the route. Without it the
 handler mints a writable token for whatever `documentId` the caller put in the
 request body — including documents belonging to a different app in the same
-tenant. The check above is the narrowest useful one: a token is only issued for
-a document *this hub actually opened*.
+tenant. `hubDocumentAuthorizer` is the narrowest useful check: a token is only
+issued for a document *this hub actually opened*. It asks the registry by
+document id, so it costs one lookup rather than a scan of every live board.
 
-`?as=` is this sample's stand-in for a login and is exactly as trustworthy as
-that sounds. A real deployment resolves the user from a session or a bearer
-token and checks board membership inside `authorize`. What the check above
-guarantees regardless is that the document is one of ours.
+The `actorId` the browser sends is this sample's stand-in for a login and is
+exactly as trustworthy as that sounds. A real deployment resolves the user from
+a session or a bearer token and adds a board-membership check on top of
+`hubDocumentAuthorizer`. What the authorizer guarantees regardless is that the
+document is one of ours.
 
-The browser side is one line, in [`src/client.ts`](src/client.ts):
+The browser side is nothing at all. The server names the route when it opens the
+relay:
 
 ```ts
-tokenProvider: httpTokenProvider(`/api/fluid/token?as=${actor}`)
+await openCollab({ kind: "fluid", relay: "azure", tokenEndpoint: "/api/fluid/token" }, "server");
 ```
+
+That travels in the join descriptor — a URL is not a secret — and
+[`connect()`](src/client.ts) builds the token provider from it, sending the
+`actorId` it was given. Delete the `.env` and the same app runs on Tinylicious,
+which needs no token at all.
 
 ## Redis is what makes a second replica possible
 
@@ -118,10 +123,10 @@ Three things follow from that swap:
   than all of them racing. Termination *is* lease-guarded either way, so the
   worst case is wasted work, not a double-ended board.
 
-Board names get the same treatment. The Hub has nowhere to put the name someone
-typed — ids have to stay URL- and MCP-path-safe — so
-[`src/board-names.ts`](src/board-names.ts) puts them next to the records, and
-the homepage shows boards created on another replica under their real names.
+Board names ride along on the record. Ids have to stay URL- and MCP-path-safe,
+so the name someone typed cannot be one; `hub.open({ label })` stores it on the
+`WorkspaceRecord`, which means the homepage shows boards created on another
+replica under their real names without a second store to keep in step.
 
 ## What a second replica actually looks like
 

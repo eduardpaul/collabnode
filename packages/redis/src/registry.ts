@@ -46,6 +46,7 @@ export interface RedisRegistryOptions {
  * - `{prefix}:ws:{id}`    the `WorkspaceRecord`, as JSON
  * - `{prefix}:lease:{id}` the lease token, with the TTL doing the expiry
  * - `{prefix}:index`      the set of known ids, for `list()` and `due()`
+ * - `{prefix}:doc:{docId}` the id of the workspace on that collab document
  *
  * The lease is a plain `SET NX PX`, so expiry is Redis's job rather than a
  * timer in some process that may already be gone.
@@ -118,12 +119,41 @@ export class RedisWorkspaceRegistry implements WorkspaceRegistry {
   async put(record: WorkspaceRecord): Promise<void> {
     await this.redis.set(this.recordKey(record.id), JSON.stringify(record));
     await this.redis.sadd(this.indexKey(), record.id);
+    if (record.collabDocId) {
+      // Reverse index for `findByCollabDocId`. Written on every put rather than
+      // once, because the document id only exists after the workspace attaches
+      // and the record is put again to mark it active.
+      await this.redis.set(this.docKey(record.collabDocId), record.id);
+    }
   }
 
   async delete(id: string): Promise<void> {
+    const record = await this.get(id);
     await this.redis.del(this.recordKey(id));
     await this.redis.del(this.leaseKey(id));
     await this.redis.srem(this.indexKey(), id);
+    if (record?.collabDocId) {
+      await this.redis.del(this.docKey(record.collabDocId));
+    }
+  }
+
+  /**
+   * One GET, then the record. This is on the request path of every browser
+   * asking for a relay token, which is why it is not a `list()` scan.
+   */
+  async findByCollabDocId(collabDocId: string): Promise<WorkspaceRecord | undefined> {
+    const id = await this.redis.get(this.docKey(collabDocId));
+    if (!id) {
+      return undefined;
+    }
+    const record = await this.get(id);
+    // The pointer can outlive its record — an eviction, or a crash between the
+    // two deletes — so a stale one is dropped rather than believed.
+    if (!record || record.collabDocId !== collabDocId) {
+      await this.redis.del(this.docKey(collabDocId));
+      return undefined;
+    }
+    return record;
   }
 
   async list(filter?: { state?: WorkspaceState; typeName?: string }): Promise<WorkspaceRecord[]> {
@@ -170,6 +200,10 @@ export class RedisWorkspaceRegistry implements WorkspaceRegistry {
 
   private indexKey(): string {
     return `${this.prefix}:index`;
+  }
+
+  private docKey(collabDocId: string): string {
+    return `${this.prefix}:doc:${collabDocId}`;
   }
 }
 

@@ -34,6 +34,15 @@ export interface Lease {
 
 export interface WorkspaceRecord {
   id: string;
+  /**
+   * What a person called this workspace, when a person named it.
+   *
+   * Ids have to stay URL- and MCP-path-safe, so the name someone typed cannot
+   * be one. Without a place for it here, every app that lets people name
+   * workspaces ends up keeping a second store beside the registry, and a name
+   * created on one replica goes missing on the next.
+   */
+  label?: string;
   typeName: string;
   version: number;
   params: Record<string, unknown>;
@@ -58,11 +67,24 @@ export interface WorkspaceRegistry {
   put(record: WorkspaceRecord): Promise<void>;
   delete(id: string): Promise<void>;
   list(filter?: { state?: WorkspaceState; typeName?: string }): Promise<WorkspaceRecord[]>;
+  /**
+   * The record whose collab document is `collabDocId`, if this registry indexes
+   * them. Optional: callers fall back to a `list()` scan, which is correct and
+   * costs a read per live workspace. Answering "may this caller open this
+   * document?" is on the request path of every browser join, so an index is
+   * worth having wherever `list()` is not free.
+   */
+  findByCollabDocId?(collabDocId: string): Promise<WorkspaceRecord | undefined>;
 }
 
 export interface OpenWorkspaceOptions {
   /** Caller-supplied id. If omitted, minted by the hub. */
   id?: string;
+  /**
+   * Display name for this workspace, stored on the record. Set on create;
+   * joining an existing workspace with a new label renames it.
+   */
+  label?: string;
   /** Parameter values for template and lifecycle evaluation. */
   params?: Record<string, unknown>;
   /** Seed from an existing artifact. */

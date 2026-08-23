@@ -134,3 +134,42 @@ describe("RedisWorkspaceRegistry", () => {
     expect(await reg.claim("ws-injected", 1000)).toBeDefined();
   });
 });
+
+describe("RedisWorkspaceRegistry document index", () => {
+  it("finds a workspace by the document it is running on", async () => {
+    const reg = registry();
+    await reg.put(record({ id: "retro-1", collabDocId: "doc-abc" }));
+
+    const found = await reg.findByCollabDocId("doc-abc");
+    expect(found?.id).toBe("retro-1");
+    expect(await reg.findByCollabDocId("doc-nope")).toBeUndefined();
+  });
+
+  it("drops the pointer when the workspace is deleted", async () => {
+    const reg = registry();
+    await reg.put(record({ id: "retro-1", collabDocId: "doc-abc" }));
+    await reg.delete("retro-1");
+
+    expect(await reg.findByCollabDocId("doc-abc")).toBeUndefined();
+  });
+
+  it("ignores a pointer whose record is gone", async () => {
+    const redis = new FakeRedis();
+    const reg = new RedisWorkspaceRegistry(redis, { prefix: "test" });
+    await reg.put(record({ id: "retro-1", collabDocId: "doc-abc" }));
+
+    // An eviction takes the record but leaves the pointer behind.
+    await redis.del("test:ws:retro-1");
+    expect(await reg.findByCollabDocId("doc-abc")).toBeUndefined();
+    // …and the stale pointer is not left to be answered a second time.
+    expect(await redis.get("test:doc:doc-abc")).toBeNull();
+  });
+
+  it("round-trips the label a person gave the workspace", async () => {
+    const reg = registry();
+    await reg.put(record({ id: "retro-1", label: "Sprint 42 retro" }));
+
+    expect((await reg.get("retro-1"))?.label).toBe("Sprint 42 retro");
+    expect((await reg.list())[0]?.label).toBe("Sprint 42 retro");
+  });
+});

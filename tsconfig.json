@@ -53,6 +53,9 @@
       "path": "packages/graph-view"
     },
     {
+      "path": "packages/react"
+    },
+    {
       "path": "packages/bench"
     }
   ]

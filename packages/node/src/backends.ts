@@ -19,7 +19,7 @@ export type CollabJoin =
   | { kind: "memory" }
   | { kind: "custom" }
   | { kind: "fluid"; relay: "tinylicious"; domain: string; port: number }
-  | { kind: "fluid"; relay: "azure"; tenantId: string; endpoint: string }
+  | { kind: "fluid"; relay: "azure"; tenantId: string; endpoint: string; tokenEndpoint?: string }
   | { kind: "hocuspocus"; url: string };
 
 export interface OpenedCollab {
@@ -72,11 +72,15 @@ export async function openCollab(
       );
       return {
         backend: new AzureFluidCollabBackend(config),
+        // The key stays here; what goes to the browser is where to ask for a
+        // token. `@collabnode/web` connect() turns this into a token provider
+        // on its own, so a browser peer needs no wiring of its own.
         join: {
           kind: "fluid",
           relay: "azure",
           tenantId: config.tenantId,
           endpoint: config.endpoint,
+          ...(collab.tokenEndpoint ? { tokenEndpoint: collab.tokenEndpoint } : {}),
         },
         close: noopClose,
       };

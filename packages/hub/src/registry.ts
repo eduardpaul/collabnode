@@ -91,6 +91,16 @@ export class MemoryWorkspaceRegistry implements WorkspaceRegistry {
     }
     return results;
   }
+
+  /** A scan, which for a Map is the index. */
+  async findByCollabDocId(collabDocId: string): Promise<WorkspaceRecord | undefined> {
+    for (const record of this.records.values()) {
+      if (record.collabDocId === collabDocId) {
+        return { ...record };
+      }
+    }
+    return undefined;
+  }
 }
 
 export function memoryRegistry(): WorkspaceRegistry {

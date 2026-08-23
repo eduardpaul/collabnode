@@ -30,6 +30,8 @@ export const ES_CATALOG: McpLocaleCatalog = {
     edgeTypesHeader: "## Tipos de arista",
     none: "(ninguno)",
     identityFields: (fields) => `- Campos de identidad: [${fields}] (los valores coincidentes actualizan el nodo existente)`,
+    singleInstance:
+      "- Instancia única: un nodo de este tipo por espacio de trabajo. Escribir en él lo actualiza; nunca hay un segundo y no necesita id.",
     propertiesHeader: "- Propiedades:",
     derivedHeader: "- Derivado (solo lectura, calculado por el servidor; no enviar):",
     guidelinesHeader: "- Directrices:",
@@ -132,9 +134,23 @@ export const ES_CATALOG: McpLocaleCatalog = {
     actors: "Lista los actores que han creado o actualizado nodos/aristas en este documento (a partir de marcas de metadatos).",
     deleteNode: "Elimina un nodo y sus aristas incidentes del grafo compartido. Falla si el id no existe.",
     deleteEdge: "Elimina una arista del grafo compartido. Falla si el id no existe.",
+    applyBatch: {
+      description:
+        "Aplica varias escrituras de nodos y aristas como un único lote atómico. Usa ref para apuntar una arista a un nodo creado en el mismo lote. Cada operación está sujeta a las mismas reglas de escritura que las herramientas individuales.",
+      ops: "Operaciones en orden: {op: 'upsertNode', type, ref?, id?, properties?, tags?}, {op: 'upsertEdge', type, from, to, properties?}, {op: 'deleteNode', id}, {op: 'deleteEdge', id}.",
+    },
+    diffSince: {
+      description:
+        "Compara una instantánea tomada antes con el grafo actual y devuelve qué cambió, como operaciones y como Markdown legible.",
+      previousSnapshot: "Un GraphSnapshot devuelto por una llamada anterior a graph_snapshot.",
+    },
     upsertNode: (type, description, guidelinesBlurb) => {
       const descPart = description ? ` ${description}` : "";
       return `Crea o actualiza un nodo ${type}.${descPart}${guidelinesBlurb}`;
+    },
+    upsertSingletonNode: (type, description, guidelinesBlurb) => {
+      const descPart = description ? ` ${description}` : "";
+      return `Actualiza el nodo ${type}. Hay exactamente uno por espacio de trabajo, creado en la primera escritura, así que esto nunca crea un segundo y no admite id. Envía solo las propiedades que cambias.${descPart}${guidelinesBlurb}`;
     },
     upsertEdge: (type, from, to, description, guidelinesBlurb) => {
       const descPart = description ? ` ${description}` : "";
@@ -163,6 +179,10 @@ export const ES_CATALOG: McpLocaleCatalog = {
     policy: {
       readOnlyNodeType: (type) =>
         `Los nodos ${type} son de solo lectura para este rol de agente: se pueden leer, pero no crear, actualizar ni eliminar.`,
+      readOnlyEdgeType: (type) =>
+        `Las aristas ${type} son de solo lectura para este rol de agente: conectarlas o desconectarlas cambiaría cómo se leen sus extremos para todos los demás.`,
+      unknownBatchOp: (op) =>
+        `Operación de lote desconocida '${op}'. Usa upsertNode, upsertEdge, deleteNode o deleteEdge.`,
     },
     propertyDescriptions: {
       datetime: "Fecha y hora ISO-8601",

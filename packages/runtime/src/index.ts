@@ -1,6 +1,7 @@
 export {
   CollabSession,
   Workspace,
+  BatchBuilder,
   normalizedIdentityMatch,
   type ApplyOpsResult,
   type CollabSessionOptions,
@@ -39,6 +40,8 @@ export {
   graphSearch,
   graphSimilar,
   graphSnapshot,
+  graphApplyBatch,
+  graphDiffSince,
   resolveEntity,
   resolveNodeRef,
   upsertGraphEdge,
@@ -75,3 +78,8 @@ export {
 } from "./tools.js";
 
 export type { GraphSearchModes } from "@collabnode/graph";
+export {
+  snapshotToMarkdown,
+  diffSnapshotsToMarkdown,
+  type SnapshotMarkdownOptions,
+} from "./snapshot-format.js";

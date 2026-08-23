@@ -12,6 +12,14 @@ export type CollabKind =
       domain?: string;
       /** Pin Tinylicious snapshots (e.g. `data/tinylicious`) so documentIds survive restart. */
       storageDir?: string;
+      /**
+       * `relay: "azure"` only. The route this server mounts with
+       * `createFluidTokenHandler`, e.g. `/api/fluid/token`. It travels in the
+       * join descriptor so a browser can reach the relay without ever seeing
+       * the tenant key; without it, browser peers have to build a token
+       * provider themselves.
+       */
+      tokenEndpoint?: string;
     }
   | { kind: "hocuspocus"; port?: number; url?: string }
   | { kind: "custom"; backend: CollabBackend };
