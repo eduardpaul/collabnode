@@ -26,7 +26,7 @@ client.session.onChange((_ops, snapshot) => render(snapshot));
 await client.session.upsertNode({ type: "Task", properties: { title: "Draft Q3 plan" } });
 ```
 
-The join payload comes from `webJoinInfo(node)` on the server. Hocuspocus uses the same shape with `collab.kind: "hocuspocus"` and a WebSocket `url`.
+The join payload comes from `webJoinInfo(node)` on the server. Hocuspocus uses the same shape with `collab.kind: "hocuspocus"` and a WebSocket `url`. `connect()` accepts `collab.kind` `fluid`, `hocuspocus`, or `custom`. An in-process `memory` join (or any other kind) throws — it will not silently open Tinylicious.
 
 > Never put an Azure tenant key in browser env. On Azure the join descriptor carries a `tokenEndpoint`, and `connect()` fetches a token scoped to one document from it, sending the `actorId` you passed. Mount that route with `createFluidTokenHandler` in [`collabnode`](https://www.npmjs.com/package/collabnode); pass `tokenProvider` instead if you mint tokens some other way.
 

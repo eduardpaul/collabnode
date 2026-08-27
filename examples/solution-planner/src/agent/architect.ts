@@ -1,14 +1,26 @@
 import type { CollabSession } from "@collabnode/runtime";
 import { snapshotToMarkdown } from "collabnode";
 import type { PlannerState, AgentLog } from "./types.ts";
-import { getChatModel } from "./llm.ts";
-import { extractJson } from "./json.ts";
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import { getChatModel, invokeStructured } from "./llm.ts";
+import {
+  applyRevisionWrites,
+  dirtyNodes,
+  formatRevisionContext,
+  formatUserReviewGuidance,
+  risksToCreates,
+  type RevisionCreate,
+  type RevisionUpdate,
+} from "./dirty.ts";
+import { architectPlanSchema, architectRevisionSchema, omitNullish } from "./schemas.ts";
 
 export async function runArchitectStep(
   session: CollabSession,
   state: PlannerState,
 ): Promise<Partial<PlannerState>> {
+  if (state.mode === "revise") {
+    return runArchitectRevise(session, state);
+  }
+
   const isEs = state.language === "es";
   const iteration = state.iteration;
   const logs: AgentLog[] = [...state.logs];
@@ -68,25 +80,7 @@ Genera:
    - uncertainty: número 0 (Hecho 100 veces) a 5 (I+D puro).
    - friction: número 0 (Solo) a 5 (Coordinación pesada).
    - nfrScale: número 0 (Bajo/Interno) a 3 (Extrema escala/cumplimiento).
-3. 1-2 Riesgos técnicos con severidad y mitigación.
-
-Responde en JSON con esta estructura:
-{
-  "c4Models": [{"title": "...", "level": "container", "markdown": "..."}],
-  "tasks": [{
-    "title": "...",
-    "description": "...",
-    "featureTitle": "...",
-    "functionalPoints": "...",
-    "technicalPoints": "...",
-    "complexity": 2,
-    "uncertainty": 1,
-    "friction": 1,
-    "nfrScale": 1,
-    "status": "todo"
-  }],
-  "techRisks": [{"title": "...", "description": "...", "severity": "high", "mitigation": "..."}]
-}`
+3. 1-2 Riesgos técnicos con severidad y mitigación.`
         : `You are an AI Software Architect. Review the business scope and features defined for this solution:
 
 ${contextMarkdown}
@@ -100,38 +94,14 @@ Produce:
    - uncertainty: number 0 (Done 100x) to 5 (Pure R&D).
    - friction: number 0 (Solo work) to 5 (Heavy cross-team coordination).
    - nfrScale: number 0 (Low/Internal) to 3 (Extreme compliance/scale).
-3. 1-2 Technical Risks with severity and mitigation.
+3. 1-2 Technical Risks with severity and mitigation.`;
 
-Respond in JSON with this structure:
-{
-  "c4Models": [{"title": "...", "level": "container", "markdown": "..."}],
-  "tasks": [{
-    "title": "...",
-    "description": "...",
-    "featureTitle": "...",
-    "functionalPoints": "...",
-    "technicalPoints": "...",
-    "complexity": 2,
-    "uncertainty": 1,
-    "friction": 1,
-    "nfrScale": 1,
-    "status": "todo"
-  }],
-  "techRisks": [{"title": "...", "description": "...", "severity": "high", "mitigation": "..."}]
-}`;
-
-      const res = await model.invoke([
-        new SystemMessage(isEs ? "Responde únicamente en JSON válido." : "Respond only with valid JSON."),
-        new HumanMessage(prompt),
-      ]);
-
-      const text = typeof res.content === "string" ? res.content : JSON.stringify(res.content);
-      const parsed = extractJson(text);
-      c4Models = Array.isArray(parsed.c4Models) ? parsed.c4Models : [];
-      tasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
-      techRisks = Array.isArray(parsed.techRisks) ? parsed.techRisks : [];
+      const parsed = await invokeStructured(model, architectPlanSchema, prompt, "architect_plan");
+      c4Models = parsed.c4Models;
+      tasks = parsed.tasks;
+      techRisks = parsed.techRisks;
     } catch (err) {
-      console.warn("LLM architect parsing error, falling back to deterministic:", err);
+      console.warn("LLM architect structured output error, falling back to deterministic:", err);
       c4Models = [];
     }
   }
@@ -289,6 +259,7 @@ flowchart TD
             title: c4.title,
             level: c4.level,
             markdown: c4.markdown,
+            dirty: false,
           },
         });
       }
@@ -310,6 +281,7 @@ flowchart TD
               friction: task.friction,
               nfrScale: task.nfrScale,
               status: task.status,
+              dirty: false,
             },
           },
           taskRef,
@@ -335,6 +307,7 @@ flowchart TD
             severity: risk.severity,
             category: "technical",
             mitigation: risk.mitigation,
+            dirty: false,
           },
         });
       }
@@ -372,6 +345,7 @@ flowchart TD
         architectAgrees,
         iteration,
         pendingAssumptionId: undefined,
+        mode: state.mode ?? "initial",
       },
     },
     { actorId: "ai-architect" },
@@ -381,5 +355,166 @@ flowchart TD
     logs,
     architectAgrees,
     status: consensusReached ? "approved" : "planning",
+  };
+}
+
+async function runArchitectRevise(
+  session: CollabSession,
+  state: PlannerState,
+): Promise<Partial<PlannerState>> {
+  const isEs = state.language === "es";
+  const iteration = state.iteration;
+  const logs: AgentLog[] = [...state.logs];
+  const model = getChatModel();
+  const snapshot = session.snapshot();
+  const dirty = dirtyNodes(snapshot);
+  const revisionMarkdown = formatRevisionContext(snapshot);
+  const graphMarkdown = snapshotToMarkdown(snapshot, {
+    types: ["Epic", "Feature", "Assumption", "Risk", "Task", "C4Model"],
+  });
+
+  const logMessage = (text: string) => {
+    logs.push({
+      actor: "architect",
+      text,
+      at: new Date().toISOString(),
+    });
+  };
+
+  logMessage(
+    isEs
+      ? `[Iteración ${iteration}] Arquitecto revisando ${dirty.length} nodo(s) sucio(s): C4, tareas y riesgos técnicos.`
+      : `[Iteration ${iteration}] Architect reviewing ${dirty.length} dirty node(s): C4, tasks, and technical risks.`,
+  );
+
+  let updates: RevisionUpdate[] = [];
+  let creates: RevisionCreate[] = [];
+  let architectAgrees = true;
+  let usedModel = false;
+
+  if (model) {
+    try {
+      const prompt = isEs
+        ? `Eres un Arquitecto de Software (AI Architect). El usuario cambió nodos del plan. Revisa SOLO los nodos sucios y sus relaciones; adapta C4, tareas (6 ejes) y riesgos técnicos. No regeneres toda la arquitectura.
+
+Grafo actual:
+${graphMarkdown}
+
+${revisionMarkdown}
+
+Reglas:
+- Actualiza nodos existentes por id.
+- Crea Tasks/C4/Riesgos solo si el cambio lo exige.
+- Enlaza Tasks a Features con HAS_TASK y a C4 con TARGETS_C4 cuando aplique.${formatUserReviewGuidance(state.reviewMessage, true)}`
+        : `You are an AI Software Architect. The user changed nodes in the plan. Review ONLY the dirty nodes and their relationships; adapt C4, 6-axis tasks, and technical risks. Do not regenerate the whole architecture.
+
+Current graph:
+${graphMarkdown}
+
+${revisionMarkdown}
+
+Rules:
+- Update existing nodes by id.
+- Create Tasks/C4/Risks only when the change requires it.
+- Link Tasks to Features with HAS_TASK and to C4 with TARGETS_C4 when relevant.${formatUserReviewGuidance(state.reviewMessage, false)}`;
+
+      const parsed = await invokeStructured(model, architectRevisionSchema, prompt, "architect_revision");
+      if (parsed.review.trim()) {
+        logMessage(parsed.review.trim());
+      }
+      updates = parsed.updates.map((update) => ({
+        id: update.id,
+        properties: omitNullish(update.properties),
+      }));
+      creates = [
+        ...parsed.creates.map((create) => ({
+          type: create.type,
+          properties: omitNullish(create.properties),
+          link: create.link ?? undefined,
+        })),
+        ...risksToCreates(parsed.risks),
+      ];
+      architectAgrees = parsed.agrees;
+      usedModel = true;
+    } catch (err) {
+      console.warn("LLM architect revise structured output error, falling back to deterministic:", err);
+    }
+  }
+
+  if (!usedModel) {
+    const dirtyTask = snapshot.nodes.find((n) => n.type === "Task" && n.properties.dirty === true);
+    const linkFrom =
+      dirtyTask?.id ?? dirty.find((n) => n.type === "Feature" || n.type === "Epic")?.id;
+    if (linkFrom) {
+      const note = state.reviewMessage?.trim();
+      const baseDescription = isEs
+        ? "Los cambios del usuario pueden desactualizar estimaciones de 6 ejes o el modelo C4."
+        : "User changes may stale 6-axis estimates or the C4 model.";
+      creates.push({
+        type: "Risk",
+        properties: {
+          title: isEs ? "Impacto técnico del cambio de alcance" : "Technical impact of scope change",
+          description: note
+            ? `${baseDescription} ${isEs ? "Nota del usuario:" : "User note:"} ${note}`
+            : baseDescription,
+          severity: "medium",
+          category: "technical",
+          mitigation: isEs
+            ? "Re-estimar tareas sucias y ajustar el C4 antes de implementar."
+            : "Re-score dirty tasks and adjust C4 before implementation.",
+        },
+        link: { type: "HAS_RISK", from: linkFrom },
+      });
+    }
+    logMessage(
+      isEs
+        ? "Arquitectura y estimaciones revisadas frente a los nodos sucios."
+        : "Architecture and estimates reviewed against dirty nodes.",
+    );
+  }
+
+  await applyRevisionWrites(session, { updates, creates }, "ai-architect");
+
+  const consensusReached = state.managerAgrees && architectAgrees;
+
+  if (architectAgrees) {
+    logMessage(
+      isEs
+        ? "✅ Arquitecto aprueba la arquitectura y las tareas revisadas."
+        : "✅ Architect approves the revised architecture and tasks.",
+    );
+  }
+
+  if (consensusReached) {
+    logMessage(
+      isEs
+        ? "🎉 Consenso alcanzado sobre los nodos revisados."
+        : "🎉 Consensus reached on the revised nodes.",
+    );
+  }
+
+  await session.upsertNode(
+    {
+      type: "SolutionState",
+      properties: {
+        appName: state.description.slice(0, 40) || "Solution",
+        description: state.description,
+        language: state.language,
+        status: consensusReached ? "approved" : "planning",
+        managerAgrees: state.managerAgrees,
+        architectAgrees,
+        iteration,
+        pendingAssumptionId: undefined,
+        mode: "revise",
+      },
+    },
+    { actorId: "ai-architect" },
+  );
+
+  return {
+    logs,
+    architectAgrees,
+    status: consensusReached ? "approved" : "planning",
+    mode: "revise",
   };
 }

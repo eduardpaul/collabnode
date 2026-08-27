@@ -3,8 +3,16 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   startPlannerWorkflow,
+  startRevisionWorkflow,
   resumePlannerWithValidation,
 } from "./agent/graph.ts";
+import {
+  clearDirty,
+  dirtyNodes,
+  isDirty,
+  markDirtyAndCascade,
+  markParentDirtyOnDelete,
+} from "./agent/dirty.ts";
 
 import { config as loadDotEnv } from "dotenv";
 
@@ -98,6 +106,11 @@ async function runTest() {
     throw new Error("Expected tasks to be created by Architect");
   }
 
+  const dirtyAfterPlan = dirtyNodes(snap2);
+  if (dirtyAfterPlan.length > 0) {
+    throw new Error(`agent-created nodes should not be dirty, found ${dirtyAfterPlan.length}`);
+  }
+
   // 6. Verify 6-axis task scoring structure
   const firstTask = tasks[0];
   console.log("✓ Sample 6-Axis Task Scoring:", {
@@ -153,6 +166,140 @@ async function runTest() {
   const snapEs = wsEs.session.snapshot();
   const tasksEs = snapEs.nodes.filter((n) => n.type === "Task");
   console.log(`✓ Spanish flow passed with ${tasksEs.length} 6-axis tasks!`);
+
+  // 8. Task status toggle does not mark dirty
+  console.log("▶ Testing dirty cascade and on-demand revision...");
+  const snapBeforeDirty = ws.session.snapshot();
+  const statusTask = snapBeforeDirty.nodes.find((n) => n.type === "Task");
+  if (!statusTask) {
+    throw new Error("Expected a Task for status-toggle dirty test");
+  }
+  await ws.session.upsertNode(
+    {
+      id: statusTask.id,
+      type: "Task",
+      properties: {
+        ...statusTask.properties,
+        status: "doing",
+      },
+    },
+    { actorId: "human-user" },
+  );
+  const afterStatus = ws.session.snapshot().nodes.find((n) => n.id === statusTask.id);
+  if (!afterStatus || isDirty(afterStatus)) {
+    throw new Error("Task.status toggle must not mark the task dirty");
+  }
+  console.log("✓ Task status toggle did not mark dirty");
+
+  // 9. Human edit on an Epic dirties the Epic, Features, and Tasks
+  const epic = snapBeforeDirty.nodes.find((n) => n.type === "Epic");
+  if (!epic) {
+    throw new Error("Expected an Epic for cascade test");
+  }
+  await ws.session.upsertNode(
+    {
+      id: epic.id,
+      type: "Epic",
+      properties: {
+        ...epic.properties,
+        description: "Changed by human — needs crew revision",
+      },
+    },
+    { actorId: "human-user" },
+  );
+  await markDirtyAndCascade(ws.session, epic.id);
+
+  const snapCascaded = ws.session.snapshot();
+  const dirtyEpic = snapCascaded.nodes.find((n) => n.id === epic.id);
+  if (!dirtyEpic || !isDirty(dirtyEpic)) {
+    throw new Error("Edited Epic should be dirty");
+  }
+  const featureIds = snapCascaded.edges
+    .filter((e) => e.type === "HAS_FEATURE" && e.from === epic.id)
+    .map((e) => e.to);
+  if (featureIds.length === 0) {
+    throw new Error("Expected HAS_FEATURE links from Epic for cascade test");
+  }
+  for (const id of featureIds) {
+    const feat = snapCascaded.nodes.find((n) => n.id === id);
+    if (!feat || !isDirty(feat)) {
+      throw new Error(`Feature ${id} should be dirty because its Epic is dirty`);
+    }
+  }
+  const taskIds = snapCascaded.edges
+    .filter((e) => e.type === "HAS_TASK" && featureIds.includes(e.from))
+    .map((e) => e.to);
+  if (taskIds.length === 0) {
+    throw new Error("Expected HAS_TASK links under dirty Epic features");
+  }
+  for (const id of taskIds) {
+    const task = snapCascaded.nodes.find((n) => n.id === id);
+    if (!task || !isDirty(task)) {
+      throw new Error(`Task ${id} should be dirty because its Epic is dirty`);
+    }
+  }
+  const solutionAfterDirty = snapCascaded.nodes.find((n) => n.type === "SolutionState");
+  if (solutionAfterDirty?.properties.managerAgrees || solutionAfterDirty?.properties.architectAgrees) {
+    throw new Error("Consensus should be broken after a human dirty edit");
+  }
+  console.log(
+    `✓ Epic dirty cascaded to ${featureIds.length} feature(s) and ${taskIds.length} task(s)`,
+  );
+
+  // 10. Deleting a Feature dirties the parent Epic
+  await clearDirty(ws.session, { actorId: "human-user" });
+  const snapClean = ws.session.snapshot();
+  const featureToDelete = snapClean.nodes.find(
+    (n) => n.type === "Feature" && featureIds.includes(n.id),
+  );
+  if (!featureToDelete) {
+    throw new Error("Expected a Feature to delete");
+  }
+  await markParentDirtyOnDelete(ws.session, featureToDelete.id);
+  const connected = snapClean.edges.filter(
+    (e) => e.from === featureToDelete.id || e.to === featureToDelete.id,
+  );
+  for (const edge of connected) {
+    await ws.session.deleteEdge(edge.id, { actorId: "human-user" });
+  }
+  await ws.session.deleteNode(featureToDelete.id, { actorId: "human-user" });
+  const epicAfterDelete = ws.session.snapshot().nodes.find((n) => n.id === epic.id);
+  if (!epicAfterDelete || !isDirty(epicAfterDelete)) {
+    throw new Error("Deleting a Feature should dirty the parent Epic");
+  }
+  console.log("✓ Deleting a Feature dirtied the parent Epic");
+
+  // 11. On-demand Manager ↔ Architect revision clears dirty and reaches consensus
+  let stateAfterRevise = await startRevisionWorkflow(ws.id, ws.session);
+  if (stateAfterRevise.status === "waiting_user_validation" && stateAfterRevise.activeAssumptionId) {
+    stateAfterRevise = await resumePlannerWithValidation(ws.id, ws.session, {
+      assumptionId: stateAfterRevise.activeAssumptionId,
+      approved: true,
+      comment: "Approved during dirty revision test",
+    });
+  }
+  if (stateAfterRevise.status !== "approved" || !stateAfterRevise.managerAgrees || !stateAfterRevise.architectAgrees) {
+    throw new Error(
+      `Expected approved consensus after revision, got status=${stateAfterRevise.status}`,
+    );
+  }
+  const snapRevised = ws.session.snapshot();
+  const leftoverDirty = dirtyNodes(snapRevised);
+  if (leftoverDirty.length > 0) {
+    throw new Error(`expected dirty flags cleared after revision, found ${leftoverDirty.length}`);
+  }
+  const epicsAfter = snapRevised.nodes.filter((n) => n.type === "Epic");
+  const tasksAfter = snapRevised.nodes.filter((n) => n.type === "Task");
+  const risksAfter = snapRevised.nodes.filter((n) => n.type === "Risk");
+  if (epicsAfter.length === 0 || tasksAfter.length === 0) {
+    throw new Error("Revision must not wipe Epics/Tasks");
+  }
+  if (risksAfter.length <= risks.length) {
+    throw new Error("Expected revision to add at least one risk while adapting the plan");
+  }
+  console.log(
+    `✓ Revision loop approved with dirty cleared (${epicsAfter.length} epics, ${tasksAfter.length} tasks, ${risksAfter.length} risks)`,
+  );
 
   await hub.close();
   await close?.();

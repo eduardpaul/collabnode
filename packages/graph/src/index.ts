@@ -55,3 +55,4 @@ export {
 export { InMemoryGraphStore } from "./memory.js";
 export type { InMemoryGraphStoreOptions } from "./memory.js";
 export { runMinimalQuery } from "./query.js";
+export { walk, type WalkDirection, type WalkHop, type WalkOptions, type WalkResult } from "./walk.js";

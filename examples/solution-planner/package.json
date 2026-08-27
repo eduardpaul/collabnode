@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --experimental-strip-types src/server.ts",
     "start": "node --experimental-strip-types src/server.ts",
-    "test": "node --experimental-strip-types src/test.ts",
+    "test": "node --experimental-strip-types src/test.ts && node --experimental-strip-types src/test-revise-usability.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
@@ -24,7 +24,8 @@
     "ioredis": "^6.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "vite": "^8.2.2"
+    "vite": "^8.2.2",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.12.0",

@@ -16,10 +16,12 @@ import { createServer as createViteServer } from "vite";
 import { config as loadDotEnv } from "dotenv";
 import {
   startPlannerWorkflow,
+  startRevisionWorkflow,
   resumePlannerWithValidation,
   runSingleAgentStep,
   getPlannerState,
 } from "./agent/graph.ts";
+import { dirtyNodes } from "./agent/dirty.ts";
 import { detectLanguage } from "./agent/llm.ts";
 
 loadDotEnv();
@@ -249,6 +251,23 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
     return true;
   }
 
+  if (path === "/api/planner/revise" && method === "POST") {
+    const payload = parseJson(await readBody(req));
+    const wsId = typeof payload?.workspaceId === "string" ? payload.workspaceId : defaultWorkspaceId;
+    const ws = await hub.open("solution-planner", { id: wsId, actorId: "server" });
+    const dirty = dirtyNodes(ws.session.snapshot());
+    if (dirty.length === 0) {
+      fail(res, 400, "no dirty nodes to revise");
+      return true;
+    }
+
+    const reviewMessage =
+      typeof payload?.reviewMessage === "string" ? payload.reviewMessage.trim() : "";
+    const result = await startRevisionWorkflow(wsId, ws.session, reviewMessage || undefined);
+    json(res, result);
+    return true;
+  }
+
   if (path === "/api/planner/step" && method === "POST") {
     const payload = parseJson(await readBody(req));
     const wsId = typeof payload?.workspaceId === "string" ? payload.workspaceId : defaultWorkspaceId;
@@ -289,6 +308,7 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
         managerAgrees: false,
         architectAgrees: false,
         iteration: 0,
+        mode: "initial",
       },
     });
 

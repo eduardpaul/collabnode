@@ -28,6 +28,26 @@ nodes:
 `;
 
 describe("connect", () => {
+  it("refuses in-process memory join instead of falling through to Tinylicious", async () => {
+    await expect(
+      connect({
+        schema: yaml,
+        documentId: "doc-1",
+        collab: { kind: "memory" } as never,
+      }),
+    ).rejects.toThrow(/memory/);
+  });
+
+  it("refuses unknown collab kinds", async () => {
+    await expect(
+      connect({
+        schema: yaml,
+        documentId: "doc-1",
+        collab: { kind: "loro" } as never,
+      }),
+    ).rejects.toThrow(/Unsupported collab.kind "loro"/);
+  });
+
   it("joins a custom backend and sees host writes", async () => {
     const schema = parseSchemaDocument(yaml);
     const backend = new InMemoryCollabBackend();

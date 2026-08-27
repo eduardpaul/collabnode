@@ -61,6 +61,19 @@ describe("CollabSession batch & snapshotToMarkdown", () => {
     expect(md).toContain("### Relationships (2)");
     expect(md).toContain("Authentication");
     expect(md).toContain("OIDC Login");
+
+    const epicId = result.refs["epic-auth"]!;
+    const subgraph = snapshotToMarkdown(snapshot, { ids: [epicId] });
+    expect(subgraph).toContain("Authentication");
+    expect(subgraph).not.toContain("OIDC Login");
+    expect(subgraph).toContain("HAS_FEATURE");
+
+    const withNeighbors = snapshotToMarkdown(snapshot, { ids: [epicId], includeNeighbors: true });
+    expect(withNeighbors).toContain("OIDC Login");
+    expect(withNeighbors).toContain("MFA");
+
+    const nodesOnly = snapshotToMarkdown(snapshot, { ids: [epicId], includeEdges: false });
+    expect(nodesOnly).not.toContain("HAS_FEATURE");
   });
 
   it("supports session.applyBatch() directly", async () => {

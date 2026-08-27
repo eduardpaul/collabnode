@@ -1,14 +1,49 @@
 import type { GraphSnapshot } from "@collabnode/graph";
+import { walk } from "@collabnode/graph";
 
 export interface SnapshotMarkdownOptions {
   /** Whether to output node properties below the title. Defaults to true. */
   includeProperties?: boolean;
   /** Filter to only include specific node types. */
   types?: string[];
+  /** Only these node ids. Combined with `types` if both are set. */
+  ids?: string[];
+  /**
+   * When `ids` is set, also include 1-hop neighbors of those nodes (both
+   * directions, every edge type). Defaults to false.
+   */
+  includeNeighbors?: boolean;
+  /**
+   * Print a Relationships section. Defaults to true. When `ids` is set, only
+   * edges incident to the selected nodes are included; otherwise every edge.
+   */
+  includeEdges?: boolean;
   /** Maximum number of nodes to include. Defaults to 100. */
   maxNodes?: number;
   /** Group nodes by their node type. Defaults to true. */
   groupByType?: boolean;
+}
+
+function selectNodes(snapshot: GraphSnapshot, options: SnapshotMarkdownOptions): GraphSnapshot["nodes"] {
+  const typeSet = options.types && options.types.length > 0 ? new Set(options.types) : undefined;
+  let nodes = snapshot.nodes;
+
+  if (options.ids) {
+    const allowed = new Set(options.ids.filter((id) => snapshot.nodes.some((n) => n.id === id)));
+    if (options.includeNeighbors) {
+      for (const id of [...allowed]) {
+        for (const hop of walk(snapshot, id, { direction: "both", depth: 1 }).hops) {
+          allowed.add(hop.node.id);
+        }
+      }
+    }
+    nodes = snapshot.nodes.filter((n) => allowed.has(n.id));
+  }
+
+  if (typeSet) {
+    nodes = nodes.filter((n) => typeSet.has(n.type));
+  }
+  return nodes;
 }
 
 /**
@@ -19,18 +54,21 @@ export function snapshotToMarkdown(
   snapshot: GraphSnapshot,
   options: SnapshotMarkdownOptions = {},
 ): string {
-  const { includeProperties = true, types, maxNodes = 100, groupByType = true } = options;
+  const { includeProperties = true, maxNodes = 100, groupByType = true, includeEdges = true } = options;
 
-  let nodes = snapshot.nodes;
-  if (types && types.length > 0) {
-    const typeSet = new Set(types);
-    nodes = nodes.filter((n) => typeSet.has(n.type));
-  }
+  let nodes = selectNodes(snapshot, options);
   if (nodes.length > maxNodes) {
     nodes = nodes.slice(0, maxNodes);
   }
+  const selectedIds = new Set(nodes.map((n) => n.id));
+  const subgraph = options.ids !== undefined;
+  const edges = includeEdges
+    ? subgraph
+      ? snapshot.edges.filter((e) => selectedIds.has(e.from) || selectedIds.has(e.to))
+      : snapshot.edges
+    : [];
 
-  if (nodes.length === 0 && snapshot.edges.length === 0) {
+  if (nodes.length === 0 && edges.length === 0) {
     return "*(Empty graph)*";
   }
 
@@ -72,9 +110,9 @@ export function snapshotToMarkdown(
     lines.push("");
   }
 
-  if (snapshot.edges.length > 0) {
-    lines.push(`### Relationships (${snapshot.edges.length})`);
-    for (const edge of snapshot.edges.slice(0, maxNodes)) {
+  if (edges.length > 0) {
+    lines.push(`### Relationships (${edges.length})`);
+    for (const edge of edges.slice(0, maxNodes)) {
       lines.push(`- \`${edge.from}\` --[${edge.type}]--> \`${edge.to}\``);
     }
     lines.push("");

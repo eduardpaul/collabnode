@@ -1,13 +1,26 @@
 import type { CollabSession } from "@collabnode/runtime";
+import { snapshotToMarkdown } from "collabnode";
 import type { PlannerState, AgentLog } from "./types.ts";
-import { getChatModel } from "./llm.ts";
-import { extractJson } from "./json.ts";
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import { getChatModel, invokeStructured } from "./llm.ts";
+import {
+  applyRevisionWrites,
+  dirtyNodes,
+  formatRevisionContext,
+  formatUserReviewGuidance,
+  risksToCreates,
+  type RevisionCreate,
+  type RevisionUpdate,
+} from "./dirty.ts";
+import { managerPlanSchema, managerRevisionSchema, omitNullish } from "./schemas.ts";
 
 export async function runManagerStep(
   session: CollabSession,
   state: PlannerState,
 ): Promise<Partial<PlannerState>> {
+  if (state.mode === "revise") {
+    return runManagerRevise(session, state);
+  }
+
   const isEs = state.language === "es";
   const iteration = state.iteration + 1;
   const logs: AgentLog[] = [...state.logs];
@@ -37,41 +50,21 @@ export async function runManagerStep(
         ? `Eres un Gerente de Producto (AI Manager). Analiza esta descripción de producto y genera:
 1. 2-3 Epics de negocio con 2 Features cada uno.
 2. 1-2 Riesgos de negocio con severidad y mitigación.
-3. Si es la primera iteración (iteración ${iteration} === 1), plantea UNA suposición clave (ej. proveedor cloud, autenticación, modelo de datos) para validar con el usuario humano.
+3. Si es la primera iteración (iteración ${iteration} === 1), plantea UNA suposición clave (ej. proveedor cloud, autenticación, modelo de datos) para validar con el usuario humano. Si no es la primera iteración, assumption debe ser null.
 
-Descripción: "${state.description}"
-
-Responde en JSON con esta estructura:
-{
-  "epics": [{"title": "...", "description": "...", "priority": "high", "features": [{"title": "...", "description": "..."}]}],
-  "businessRisks": [{"title": "...", "description": "...", "severity": "medium", "mitigation": "..."}],
-  "assumption": {"title": "...", "description": "..."} // o null si no hay nueva
-}`
+Descripción: "${state.description}"`
         : `You are an AI Product Manager. Analyze this product description and produce:
 1. 2-3 Business Epics with 2 Features each.
 2. 1-2 Business Risks with severity and mitigation.
-3. If iteration ${iteration} === 1, raise ONE critical assumption (e.g. cloud provider, auth provider, storage tier) for human validation.
+3. If iteration ${iteration} === 1, raise ONE critical assumption (e.g. cloud provider, auth provider, storage tier) for human validation. Otherwise assumption must be null.
 
-Description: "${state.description}"
+Description: "${state.description}"`;
 
-Respond in JSON with this structure:
-{
-  "epics": [{"title": "...", "description": "...", "priority": "high", "features": [{"title": "...", "description": "..."}]}],
-  "businessRisks": [{"title": "...", "description": "...", "severity": "medium", "mitigation": "..."}],
-  "assumption": {"title": "...", "description": "..."} // or null if none
-}`;
-
-      const res = await model.invoke([
-        new SystemMessage(isEs ? "Responde únicamente en JSON válido." : "Respond only with valid JSON."),
-        new HumanMessage(prompt),
-      ]);
-
-      const text = typeof res.content === "string" ? res.content : JSON.stringify(res.content);
-      const parsed = extractJson(text);
-      epics = Array.isArray(parsed.epics) ? parsed.epics : [];
-      businessRisks = Array.isArray(parsed.businessRisks) ? parsed.businessRisks : [];
+      const parsed = await invokeStructured(model, managerPlanSchema, prompt, "manager_plan");
+      epics = parsed.epics;
+      businessRisks = parsed.businessRisks;
       if (iteration === 1) {
-        newAssumption = parsed.assumption || {
+        newAssumption = parsed.assumption ?? {
           title: isEs ? "Asumir Infraestructura Cloud Híbrida" : "Assume Cloud & Security Tier",
           description: isEs
             ? "¿Aceptas asumir despliegue en nube con autenticación OIDC y cifrado en tránsito?"
@@ -79,7 +72,7 @@ Respond in JSON with this structure:
         };
       }
     } catch (err) {
-      console.warn("LLM manager parsing error, falling back to deterministic:", err);
+      console.warn("LLM manager structured output error, falling back to deterministic:", err);
       epics = [];
     }
   }
@@ -200,6 +193,7 @@ Respond in JSON with this structure:
               title: epic.title,
               description: epic.description,
               priority: epic.priority,
+              dirty: false,
             },
           },
           epicRef,
@@ -215,6 +209,7 @@ Respond in JSON with this structure:
                 title: feat.title,
                 description: feat.description,
                 epicTitle: epic.title,
+                dirty: false,
               },
             },
             featRef,
@@ -237,6 +232,7 @@ Respond in JSON with this structure:
             severity: risk.severity,
             category: "business",
             mitigation: risk.mitigation,
+            dirty: false,
           },
         });
       }
@@ -257,6 +253,7 @@ Respond in JSON with this structure:
           description: newAssumption.description,
           status: "pending",
           raisedBy: "manager",
+          dirty: false,
         },
       },
       { actorId: "ai-manager" },
@@ -284,6 +281,7 @@ Respond in JSON with this structure:
           architectAgrees: state.architectAgrees,
           iteration,
           pendingAssumptionId: assumptionId,
+          mode: state.mode ?? "initial",
         },
       },
       { actorId: "ai-manager" },
@@ -321,6 +319,7 @@ Respond in JSON with this structure:
         architectAgrees: state.architectAgrees,
         iteration,
         pendingAssumptionId: undefined,
+        mode: state.mode ?? "initial",
       },
     },
     { actorId: "ai-manager" },
@@ -331,5 +330,226 @@ Respond in JSON with this structure:
     logs,
     status: managerAgrees && state.architectAgrees ? "approved" : "planning",
     managerAgrees,
+  };
+}
+
+async function runManagerRevise(
+  session: CollabSession,
+  state: PlannerState,
+): Promise<Partial<PlannerState>> {
+  const isEs = state.language === "es";
+  const iteration = state.iteration + 1;
+  const logs: AgentLog[] = [...state.logs];
+  const model = getChatModel();
+  const snapshot = session.snapshot();
+  const dirty = dirtyNodes(snapshot);
+  const revisionMarkdown = formatRevisionContext(snapshot);
+  const graphMarkdown = snapshotToMarkdown(snapshot, {
+    types: ["Epic", "Feature", "Assumption", "Risk", "Task", "C4Model"],
+  });
+
+  const logMessage = (text: string) => {
+    logs.push({
+      actor: "manager",
+      text,
+      at: new Date().toISOString(),
+    });
+  };
+
+  logMessage(
+    isEs
+      ? `[Iteración ${iteration}] Gestor revisando ${dirty.length} nodo(s) sucio(s) y sus relaciones.`
+      : `[Iteration ${iteration}] Manager reviewing ${dirty.length} dirty node(s) and their relationships.`,
+  );
+
+  let updates: RevisionUpdate[] = [];
+  let creates: RevisionCreate[] = [];
+  let newAssumption: { title: string; description: string } | null = null;
+  let managerAgrees = true;
+  let usedModel = false;
+
+  if (model) {
+    try {
+      const prompt = isEs
+        ? `Eres un Gerente de Producto (AI Manager). El usuario cambió nodos del plan. Revisa SOLO los nodos sucios y sus relaciones; adapta el alcance de negocio, no regeneres el plan completo.
+
+Grafo actual:
+${graphMarkdown}
+
+${revisionMarkdown}
+
+Reglas:
+- Actualiza nodos existentes por id.
+- Crea Features/Riesgos solo si el cambio lo exige.
+- Plantea UNA suposición solo si el cambio es crítico y aún no hay una pendiente.
+- dirty debe quedar limpio en tus escrituras (el runtime lo fuerza).${formatUserReviewGuidance(state.reviewMessage, true)}`
+        : `You are an AI Product Manager. The user changed nodes in the plan. Review ONLY the dirty nodes and their relationships; adapt business scope — do not regenerate the whole plan.
+
+Current graph:
+${graphMarkdown}
+
+${revisionMarkdown}
+
+Rules:
+- Update existing nodes by id.
+- Create Features/Risks only when the change requires it.
+- Raise ONE assumption only if the change is load-bearing and none is already pending.
+- Your writes are stamped clean (not dirty).${formatUserReviewGuidance(state.reviewMessage, false)}`;
+
+      const parsed = await invokeStructured(model, managerRevisionSchema, prompt, "manager_revision");
+      if (parsed.review.trim()) {
+        logMessage(parsed.review.trim());
+      }
+      updates = parsed.updates.map((update) => ({
+        id: update.id,
+        properties: omitNullish(update.properties),
+      }));
+      creates = [
+        ...parsed.creates.map((create) => ({
+          type: create.type,
+          properties: omitNullish(create.properties),
+          link: create.link ?? undefined,
+        })),
+        ...risksToCreates(parsed.risks),
+      ];
+      if (parsed.assumption?.title.trim()) {
+        newAssumption = {
+          title: parsed.assumption.title.trim(),
+          description: parsed.assumption.description.trim(),
+        };
+      }
+      managerAgrees = parsed.agrees;
+      usedModel = true;
+    } catch (err) {
+      console.warn("LLM manager revise structured output error, falling back to deterministic:", err);
+    }
+  }
+
+  if (!usedModel) {
+    const dirtyEpic = snapshot.nodes.find((n) => n.type === "Epic" && n.properties.dirty === true);
+    if (dirtyEpic) {
+      const note = state.reviewMessage?.trim();
+      const baseDescription = isEs
+        ? `El usuario modificó "${String(dirtyEpic.properties.title)}". Hay que revalidar Features, tareas y riesgos asociados.`
+        : `The user changed "${String(dirtyEpic.properties.title)}". Linked features, tasks, and risks need revalidation.`;
+      creates.push({
+        type: "Risk",
+        properties: {
+          title: isEs ? "Cambio de alcance pendiente de alinear" : "Scope change needs alignment",
+          description: note
+            ? `${baseDescription} ${isEs ? "Nota del usuario:" : "User note:"} ${note}`
+            : baseDescription,
+          severity: "medium",
+          category: "business",
+          mitigation: isEs
+            ? "Revisar descendientes del Epic y ajustar el plan antes de implementar."
+            : "Review the Epic's descendants and adjust the plan before implementation.",
+        },
+        link: { type: "HAS_RISK", from: dirtyEpic.id },
+      });
+      logMessage(
+        isEs
+          ? `Adaptando el alcance de "${String(dirtyEpic.properties.title)}" y registrando un riesgo de negocio.`
+          : `Adapting scope for "${String(dirtyEpic.properties.title)}" and recording a business risk.`,
+      );
+    } else {
+      logMessage(
+        isEs
+          ? "Revisión de negocio completada: sin cambios estructurales adicionales."
+          : "Business review complete: no extra structural changes.",
+      );
+    }
+  }
+
+  await applyRevisionWrites(session, { updates, creates }, "ai-manager");
+
+  let activeAssumptionId = state.activeAssumptionId;
+  let status: PlannerState["status"] = "planning";
+
+  if (newAssumption && !state.activeAssumptionId) {
+    const assumptionId = await session.upsertNode(
+      {
+        type: "Assumption",
+        properties: {
+          title: newAssumption.title,
+          description: newAssumption.description,
+          status: "pending",
+          raisedBy: "manager",
+          dirty: false,
+        },
+      },
+      { actorId: "ai-manager" },
+    );
+
+    activeAssumptionId = assumptionId;
+    status = "waiting_user_validation";
+    managerAgrees = false;
+
+    logMessage(
+      isEs
+        ? `⚠️ [Suposición Crítica] "${newAssumption.title}". Pausando el flujo para validación humana.`
+        : `⚠️ [Critical Assumption] "${newAssumption.title}". Pausing workflow for user validation.`,
+    );
+
+    await session.upsertNode(
+      {
+        type: "SolutionState",
+        properties: {
+          appName: state.description.slice(0, 40) || "Solution",
+          description: state.description,
+          language: state.language,
+          status: "waiting_user_validation",
+          managerAgrees: false,
+          architectAgrees: state.architectAgrees,
+          iteration,
+          pendingAssumptionId: assumptionId,
+          mode: "revise",
+        },
+      },
+      { actorId: "ai-manager" },
+    );
+
+    return {
+      iteration,
+      logs,
+      activeAssumptionId,
+      status,
+      managerAgrees: false,
+      mode: "revise",
+    };
+  }
+
+  if (managerAgrees) {
+    logMessage(
+      isEs
+        ? "✅ Gestor aprueba el alcance de negocio revisado."
+        : "✅ Manager approves the revised business scope.",
+    );
+  }
+
+  await session.upsertNode(
+    {
+      type: "SolutionState",
+      properties: {
+        appName: state.description.slice(0, 40) || "Solution",
+        description: state.description,
+        language: state.language,
+        status: managerAgrees && state.architectAgrees ? "approved" : "planning",
+        managerAgrees,
+        architectAgrees: state.architectAgrees,
+        iteration,
+        pendingAssumptionId: undefined,
+        mode: "revise",
+      },
+    },
+    { actorId: "ai-manager" },
+  );
+
+  return {
+    iteration,
+    logs,
+    status: managerAgrees && state.architectAgrees ? "approved" : "planning",
+    managerAgrees,
+    mode: "revise",
   };
 }

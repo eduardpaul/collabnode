@@ -105,7 +105,8 @@ body {
   gap: 12px;
 }
 
-.prompt-row {
+.prompt-row,
+.revise-row {
   display: flex;
   gap: 10px;
 }
@@ -324,6 +325,20 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.card.dirty {
+  border-color: var(--warning);
+  box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.25);
+}
+
+.badge-dirty {
+  background: rgba(245, 158, 11, 0.18);
+  color: var(--warning);
+  border: 1px solid var(--warning);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
 }
 
 .card-title {

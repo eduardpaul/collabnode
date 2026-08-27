@@ -7,16 +7,29 @@ export async function openWebCollab(
   collab: WebCollabKind,
   options: { actorId?: string } = {},
 ): Promise<CollabBackend> {
-  if (collab.kind === "custom") {
-    return collab.backend;
+  switch (collab.kind) {
+    case "custom":
+      return collab.backend;
+    case "hocuspocus":
+      return openHocuspocus(collab);
+    case "fluid":
+      if (collab.relay === "azure") {
+        return openAzureFluid(collab, options.actorId);
+      }
+      return openTinyliciousFluid(collab);
+    default: {
+      const kind = (collab as { kind?: unknown }).kind;
+      const label = typeof kind === "string" && kind.length > 0 ? kind : "unknown";
+      if (label === "memory") {
+        throw new Error(
+          'collab.kind "memory" is in-process and cannot join from a browser. Use Fluid or Hocuspocus, or pass { kind: "custom", backend }. @collabnode/web will not fall through to Tinylicious.',
+        );
+      }
+      throw new Error(
+        `Unsupported collab.kind "${label}" for @collabnode/web. Expected "fluid", "hocuspocus", or "custom".`,
+      );
+    }
   }
-  if (collab.kind === "hocuspocus") {
-    return openHocuspocus(collab);
-  }
-  if (collab.kind === "fluid" && collab.relay === "azure") {
-    return openAzureFluid(collab, options.actorId);
-  }
-  return openTinyliciousFluid(collab);
 }
 
 /**

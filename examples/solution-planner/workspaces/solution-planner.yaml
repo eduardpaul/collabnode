@@ -51,6 +51,10 @@ schema:
           default: 0
         pendingAssumptionId:
           type: string
+        mode:
+          type: enum
+          values: [initial, revise]
+          default: initial
       ui:
         label: "{appName}"
         color: "#6366f1"
@@ -73,6 +77,12 @@ schema:
           type: enum
           values: [low, medium, high]
           default: medium
+        dirty:
+          type: boolean
+          default: false
+          description:
+            en: Human-changed, not yet revised by the Manager/Architect crew
+            es: Cambiado por el usuario, aún no revisado por el equipo Gestor/Arquitecto
       ui:
         label: "{title}"
         color: "#3b82f6"
@@ -93,6 +103,12 @@ schema:
           type: text
         epicTitle:
           type: string
+        dirty:
+          type: boolean
+          default: false
+          description:
+            en: Human-changed, not yet revised by the Manager/Architect crew
+            es: Cambiado por el usuario, aún no revisado por el equipo Gestor/Arquitecto
       ui:
         label: "{title}"
         color: "#06b6d4"
@@ -113,6 +129,12 @@ schema:
           default: container
         markdown:
           type: text
+        dirty:
+          type: boolean
+          default: false
+          description:
+            en: Human-changed, not yet revised by the Manager/Architect crew
+            es: Cambiado por el usuario, aún no revisado por el equipo Gestor/Arquitecto
       ui:
         label: "{title}"
         color: "#8b5cf6"
@@ -171,6 +193,12 @@ schema:
           type: enum
           values: [todo, doing, done]
           default: todo
+        dirty:
+          type: boolean
+          default: false
+          description:
+            en: Human-changed, not yet revised by the Manager/Architect crew
+            es: Cambiado por el usuario, aún no revisado por el equipo Gestor/Arquitecto
       ui:
         label: "{title}"
         color: "#10b981"
@@ -197,6 +225,12 @@ schema:
           default: business
         mitigation:
           type: text
+        dirty:
+          type: boolean
+          default: false
+          description:
+            en: Human-changed, not yet revised by the Manager/Architect crew
+            es: Cambiado por el usuario, aún no revisado por el equipo Gestor/Arquitecto
       ui:
         label: "{title}"
         color: "#ef4444"
@@ -223,6 +257,12 @@ schema:
           default: manager
         userComment:
           type: text
+        dirty:
+          type: boolean
+          default: false
+          description:
+            en: Human-changed, not yet revised by the Manager/Architect crew
+            es: Cambiado por el usuario, aún no revisado por el equipo Gestor/Arquitecto
       ui:
         label: "{title}"
         color: "#f59e0b"
@@ -269,6 +309,7 @@ template:
         managerAgrees: false
         architectAgrees: false
         iteration: 0
+        mode: initial
 
 lifecycle:
   idleTimeout: 30m

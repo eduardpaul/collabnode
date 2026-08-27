@@ -78,6 +78,7 @@ export {
 } from "./tools.js";
 
 export type { GraphSearchModes } from "@collabnode/graph";
+export { walk, type WalkDirection, type WalkHop, type WalkOptions, type WalkResult } from "@collabnode/graph";
 export {
   snapshotToMarkdown,
   diffSnapshotsToMarkdown,

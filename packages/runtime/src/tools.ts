@@ -6,7 +6,7 @@ import type {
   HistoryEntry,
   QueryResult,
 } from "@collabnode/graph";
-import { GraphStoreError, squash } from "@collabnode/graph";
+import { GraphStoreError, squash, walk } from "@collabnode/graph";
 import {
   crdtProperties,
   identityId,
@@ -890,67 +890,22 @@ export function graphNeighbors(session: CollabSession, args: GraphNeighborsArgs)
     Math.max(1, typeof args.depth === "number" && Number.isFinite(args.depth) ? Math.floor(args.depth) : 1),
   );
   const limit = clampLimit(args.limit, MAX_LIST_LIMIT);
-  const nodesById = new Map(snapshot.nodes.map((record) => [record.id, record]));
-  const neighbors: Array<{
-    depth: number;
-    direction: "in" | "out";
-    fromId: string;
-    edge: ReturnType<typeof incidentSummary>;
-    node: ReturnType<typeof nodeSummary>;
-  }> = [];
-  const seenNodes = new Set<string>([start.id]);
-  let frontier = [start.id];
-  let hitLimit = false;
-  for (let hop = 1; hop <= depth && !hitLimit; hop++) {
-    const next: string[] = [];
-    for (const currentId of frontier) {
-      for (const edge of snapshot.edges) {
-        if (edgeTypes && !edgeTypes.includes(edge.type)) {
-          continue;
-        }
-        let hopDirection: "in" | "out" | undefined;
-        let otherId: string | undefined;
-        if (edge.from === currentId) {
-          hopDirection = "out";
-          otherId = edge.to;
-        } else if (edge.to === currentId) {
-          hopDirection = "in";
-          otherId = edge.from;
-        }
-        if (!hopDirection || !otherId || (direction !== "both" && hopDirection !== direction)) {
-          continue;
-        }
-        if (seenNodes.has(otherId)) {
-          continue;
-        }
-        const other = nodesById.get(otherId);
-        if (!other) {
-          continue;
-        }
-        seenNodes.add(otherId);
-        next.push(otherId);
-        neighbors.push({
-          depth: hop,
-          direction: hopDirection,
-          fromId: currentId,
-          edge: incidentSummary(schema, edge),
-          node: nodeSummary(schema, other, true),
-        });
-        if (neighbors.length > limit) {
-          hitLimit = true;
-          break;
-        }
-      }
-      if (hitLimit) {
-        break;
-      }
-    }
-    frontier = next;
-  }
+  const walked = walk(snapshot, start.id, {
+    ...(edgeTypes ? { edgeTypes } : {}),
+    direction,
+    depth,
+    limit,
+  });
   return {
     node: nodeSummary(schema, start, true),
-    neighbors: hitLimit ? neighbors.slice(0, limit) : neighbors,
-    truncated: hitLimit ? true : undefined,
+    neighbors: walked.hops.map((hop) => ({
+      depth: hop.depth,
+      direction: hop.direction,
+      fromId: hop.fromId,
+      edge: incidentSummary(schema, hop.edge),
+      node: nodeSummary(schema, hop.node, true),
+    })),
+    truncated: walked.truncated,
   };
 }
 

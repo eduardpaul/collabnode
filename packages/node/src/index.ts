@@ -109,11 +109,16 @@ export {
   searchableProperties,
   vectorProperties,
   vectorText,
+  walk,
   type EmbeddingProvider,
   type GraphSearchHit,
   type GraphSearchRequest,
   type GraphStore,
   type GraphVectorRequest,
+  type WalkDirection,
+  type WalkHop,
+  type WalkOptions,
+  type WalkResult,
 } from "@collabnode/graph";
 export { localEmbeddings, type LocalEmbeddingOptions } from "@collabnode/embeddings";
 export {

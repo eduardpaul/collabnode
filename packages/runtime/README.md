@@ -37,6 +37,7 @@ Join an existing document with `CollabSession.join(documentId, options)`. `actor
 | Validation | `assertNodeOp`, `assertEdgeOp`, `coerceProperties`, `normalizeTags` |
 | Derived & history | `applyDerivedProperties`, `redactHistoryValue` |
 | Graph tools | `bindGraphTools` plus the individual `graphGet` / `graphList` / `graphSearch` / `graphQuery` / `graphNeighbors` / `graphSimilar` / `graphHistory` / `graphChanges` / `graphSnapshot` / `upsertGraphNode` / `upsertGraphEdge` / `deleteGraphNode` / `deleteGraphEdge` operations |
+| Snapshot helpers | `snapshotToMarkdown` (`ids`, `includeNeighbors`, `includeEdges`), `walk` (re-exported from `@collabnode/graph`; `graph_neighbors` uses it) |
 
 The graph tools are transport-independent — [`@collabnode/mcp`](https://www.npmjs.com/package/@collabnode/mcp) wraps the same functions as MCP tools.
 

@@ -1,8 +1,9 @@
 import { StateGraph, Annotation, END, START } from "@langchain/langgraph";
 import type { CollabSession } from "@collabnode/runtime";
-import type { PlannerState, UserValidationPayload, AgentLog } from "./types.ts";
+import type { PlannerState, PlannerMode, UserValidationPayload, AgentLog } from "./types.ts";
 import { runManagerStep } from "./manager.ts";
 import { runArchitectStep } from "./architect.ts";
+import { clearDirty, dirtyNodes } from "./dirty.ts";
 
 // Session lookup registry by workspaceId
 const sessionRegistry = new Map<string, CollabSession>();
@@ -25,6 +26,8 @@ const PlannerAnnotation = Annotation.Root({
   managerAgrees: Annotation<boolean>,
   architectAgrees: Annotation<boolean>,
   status: Annotation<"idle" | "planning" | "waiting_user_validation" | "approved">,
+  mode: Annotation<PlannerMode>,
+  reviewMessage: Annotation<string | undefined>,
   activeAssumptionId: Annotation<string | undefined>,
   userValidation: Annotation<UserValidationPayload | undefined>,
   logs: Annotation<AgentLog[]>({
@@ -98,6 +101,7 @@ export async function startPlannerWorkflow(
     managerAgrees: false,
     architectAgrees: false,
     status: "planning",
+    mode: "initial",
     logs: [
       {
         actor: "system",
@@ -113,8 +117,95 @@ export async function startPlannerWorkflow(
 
   const result = await compiledGraph.invoke(initialState);
   const finalState = { ...initialState, ...result } as PlannerState;
+  await finalizeRevisionIfAgreed(session, finalState);
   stateRegistry.set(workspaceId, finalState);
   return finalState;
+}
+
+/**
+ * Re-run the Manager ↔ Architect loop against dirty nodes and their relationships.
+ */
+export async function startRevisionWorkflow(
+  workspaceId: string,
+  session: CollabSession,
+  reviewMessage?: string,
+): Promise<PlannerState> {
+  registerPlannerSession(workspaceId, session);
+
+  const snapshot = session.snapshot();
+  const dirty = dirtyNodes(snapshot);
+  if (dirty.length === 0) {
+    throw new Error("No dirty nodes to revise");
+  }
+
+  const existing = stateRegistry.get(workspaceId);
+  const solution = snapshot.nodes.find((n) => n.type === "SolutionState");
+  const language = (existing?.language ?? (solution?.properties.language as "en" | "es") ?? "en") as
+    | "en"
+    | "es";
+  const description =
+    existing?.description ?? String(solution?.properties.description || "Solution Planning");
+  const isEs = language === "es";
+  const note = reviewMessage?.trim() || undefined;
+
+  const initialState: PlannerState = {
+    workspaceId,
+    description,
+    language,
+    iteration: existing?.iteration ?? Number(solution?.properties.iteration || 0),
+    managerAgrees: false,
+    architectAgrees: false,
+    status: "planning",
+    mode: "revise",
+    reviewMessage: note,
+    logs: [
+      ...(existing?.logs ?? []),
+      {
+        actor: "system",
+        text: isEs
+          ? `♻️ Revisando ${dirty.length} nodo(s) sucio(s) y sus relaciones.`
+          : `♻️ Revising ${dirty.length} dirty node(s) and their relationships.`,
+        at: new Date().toISOString(),
+      },
+      ...(note
+        ? [
+            {
+              actor: "user" as const,
+              text: isEs ? `📝 Nota de revisión: "${note}"` : `📝 Review note: "${note}"`,
+              at: new Date().toISOString(),
+            },
+          ]
+        : []),
+    ],
+  };
+
+  await session.upsertNode(
+    {
+      type: "SolutionState",
+      properties: {
+        status: "planning",
+        managerAgrees: false,
+        architectAgrees: false,
+        mode: "revise",
+      },
+    },
+    { actorId: "system" },
+  );
+
+  stateRegistry.set(workspaceId, initialState);
+
+  const result = await compiledGraph.invoke(initialState);
+  const finalState = { ...initialState, ...result } as PlannerState;
+  await finalizeRevisionIfAgreed(session, finalState);
+  stateRegistry.set(workspaceId, finalState);
+  return finalState;
+}
+
+async function finalizeRevisionIfAgreed(session: CollabSession, state: PlannerState): Promise<void> {
+  if (state.mode !== "revise" || !state.managerAgrees || !state.architectAgrees) {
+    return;
+  }
+  await clearDirty(session, { actorId: "system" });
 }
 
 /**
@@ -178,6 +269,7 @@ export async function resumePlannerWithValidation(
   // Directly execute Architect step to reflect user's validation immediately
   const architectNext = await runArchitectStep(session, resumedState);
   const finalState = { ...resumedState, ...architectNext } as PlannerState;
+  await finalizeRevisionIfAgreed(session, finalState);
   stateRegistry.set(workspaceId, finalState);
   return finalState;
 }
@@ -204,6 +296,8 @@ export async function runSingleAgentStep(
       managerAgrees: Boolean(solution?.properties.managerAgrees),
       architectAgrees: Boolean(solution?.properties.architectAgrees),
       status: "planning",
+      mode: solution?.properties.mode === "revise" ? "revise" : "initial",
+      reviewMessage: undefined,
       logs: [],
     };
   }
@@ -211,11 +305,13 @@ export async function runSingleAgentStep(
   if (actor === "manager") {
     const next = await runManagerStep(session, currentState);
     const updated = { ...currentState, ...next } as PlannerState;
+    await finalizeRevisionIfAgreed(session, updated);
     stateRegistry.set(workspaceId, updated);
     return updated;
   } else {
     const next = await runArchitectStep(session, currentState);
     const updated = { ...currentState, ...next } as PlannerState;
+    await finalizeRevisionIfAgreed(session, updated);
     stateRegistry.set(workspaceId, updated);
     return updated;
   }

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useCollabJoin } from "@collabnode/react";
 import type { CollabGraph } from "@collabnode/graph-view";
+import { markDirtyAndCascade, markParentDirtyOnDelete } from "./agent/dirty.ts";
 
 interface AgentLog {
   actor: "manager" | "architect" | "user" | "system";
@@ -42,6 +43,7 @@ export function App() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [agentLogs, setAgentLogs] = useState<AgentLog[]>([]);
   const [validationComment, setValidationComment] = useState("");
+  const [reviseMessage, setReviseMessage] = useState("");
   const [editingC4Id, setEditingC4Id] = useState<string | null>(null);
   const [c4DraftMarkdown, setC4DraftMarkdown] = useState<string>("");
 
@@ -96,6 +98,9 @@ export function App() {
   const managerAgrees = Boolean(solutionState?.properties.managerAgrees);
   const architectAgrees = Boolean(solutionState?.properties.architectAgrees);
   const iteration = Number(solutionState?.properties.iteration ?? 0);
+  const dirtyCount = nodes.filter((n) => n.type !== "SolutionState" && n.properties.dirty === true).length;
+  const canReviseDirty =
+    dirtyCount > 0 && currentStatus !== "planning" && currentStatus !== "waiting_user_validation";
   const pendingAssumptionId = solutionState?.properties.pendingAssumptionId as string | undefined;
 
   const pendingAssumption = assumptions.find(
@@ -194,6 +199,38 @@ export function App() {
     }
   };
 
+  const markHumanDirty = async (nodeId: string | undefined) => {
+    if (!session || !nodeId) return;
+    await markDirtyAndCascade(session, nodeId);
+  };
+
+  const markParentBeforeDelete = async (nodeId: string) => {
+    if (!session) return;
+    await markParentDirtyOnDelete(session, nodeId);
+  };
+
+  const handleReviseDirty = async () => {
+    if (!canReviseDirty) return;
+    setIsSubmitting(true);
+    try {
+      const res = await fetch("/api/planner/revise", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: currentWorkspaceId,
+          reviewMessage: reviseMessage.trim() || undefined,
+        }),
+      });
+      if (res.ok) {
+        setReviseMessage("");
+      }
+    } catch (err) {
+      console.error("Revise dirty error:", err);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const handleTriggerAgent = async (actor: "manager" | "architect") => {
     setIsSubmitting(true);
     try {
@@ -246,6 +283,7 @@ export function App() {
       });
       setAgentLogs([]);
       setDescription("");
+      setReviseMessage("");
     } catch (err) {
       console.error("Reset error:", err);
     } finally {
@@ -260,10 +298,11 @@ export function App() {
     const desc = window.prompt(isEs ? "Descripción del Epic:" : "Description of Epic:", "")?.trim() ?? "";
     const priority = (window.prompt(isEs ? "Prioridad (low/medium/high):" : "Priority (low/medium/high):", "medium")?.trim().toLowerCase() || "medium") as "low" | "medium" | "high";
 
-    await upsertNode(
-      { type: "Epic", properties: { title, description: desc, priority } },
+    const id = await upsertNode(
+      { type: "Epic", properties: { title, description: desc, priority, dirty: true } },
       { actorId: "human-user" },
     );
+    await markHumanDirty(id);
   };
 
   const handleEditEpic = async (epicId: string) => {
@@ -275,13 +314,15 @@ export function App() {
     const priority = (window.prompt(isEs ? "Prioridad (low/medium/high):" : "Priority (low/medium/high):", String(epic.properties.priority ?? "medium"))?.trim().toLowerCase() || "medium") as "low" | "medium" | "high";
 
     await upsertNode(
-      { id: epicId, type: "Epic", properties: { ...epic.properties, title, description: desc, priority } },
+      { id: epicId, type: "Epic", properties: { ...epic.properties, title, description: desc, priority, dirty: true } },
       { actorId: "human-user" },
     );
+    await markHumanDirty(epicId);
   };
 
   const handleDeleteEpic = async (epicId: string) => {
     if (!window.confirm(isEs ? "¿Eliminar este Epic y sus enlaces?" : "Delete this Epic and associated links?")) return;
+    await markParentBeforeDelete(epicId);
     const connectedEdges = edges.filter((e) => e.from === epicId || e.to === epicId);
     for (const edge of connectedEdges) {
       await deleteEdge(edge.id, { actorId: "human-user" });
@@ -296,7 +337,7 @@ export function App() {
     const desc = window.prompt(isEs ? "Descripción de la Feature:" : "Feature Description:", "")?.trim() ?? "";
 
     const featId = await upsertNode(
-      { type: "Feature", properties: { title, description: desc, epicTitle } },
+      { type: "Feature", properties: { title, description: desc, epicTitle, dirty: true } },
       { actorId: "human-user" },
     );
 
@@ -304,6 +345,7 @@ export function App() {
       { type: "HAS_FEATURE", from: epicId, to: featId },
       { actorId: "human-user" },
     );
+    await markHumanDirty(featId);
   };
 
   const handleEditFeature = async (featId: string) => {
@@ -314,13 +356,15 @@ export function App() {
     const desc = window.prompt(isEs ? "Editar descripción:" : "Edit Description:", String(feat.properties.description ?? ""))?.trim() ?? "";
 
     await upsertNode(
-      { id: featId, type: "Feature", properties: { ...feat.properties, title, description: desc } },
+      { id: featId, type: "Feature", properties: { ...feat.properties, title, description: desc, dirty: true } },
       { actorId: "human-user" },
     );
+    await markHumanDirty(featId);
   };
 
   const handleDeleteFeature = async (featId: string) => {
     if (!window.confirm(isEs ? "¿Eliminar esta Feature?" : "Delete this Feature?")) return;
+    await markParentBeforeDelete(featId);
     const connectedEdges = edges.filter((e) => e.from === featId || e.to === featId);
     for (const edge of connectedEdges) {
       await deleteEdge(edge.id, { actorId: "human-user" });
@@ -340,7 +384,7 @@ export function App() {
     const friction = Number(window.prompt(isEs ? "Fricción (0 a 5):" : "Friction (0 to 5):", "1") ?? 1);
     const nfrScale = Number(window.prompt(isEs ? "Escala NFR (0 a 3):" : "NFR Scale (0 to 3):", "1") ?? 1);
 
-    await upsertNode(
+    const taskId = await upsertNode(
       {
         type: "Task",
         properties: {
@@ -353,10 +397,12 @@ export function App() {
           friction,
           nfrScale,
           status: "todo",
+          dirty: true,
         },
       },
       { actorId: "human-user" },
     );
+    await markHumanDirty(taskId);
   };
 
   const handleToggleTaskStatus = async (taskId: string) => {
@@ -382,23 +428,26 @@ export function App() {
       const val = window.prompt(`Edit ${axis}:`, String(task.properties[axis] ?? ""))?.trim();
       if (val !== undefined && val !== null) {
         await upsertNode(
-          { id: taskId, type: "Task", properties: { ...task.properties, [axis]: val } },
+          { id: taskId, type: "Task", properties: { ...task.properties, [axis]: val, dirty: true } },
           { actorId: "human-user" },
         );
+        await markHumanDirty(taskId);
       }
     } else {
       const maxVal = axis === "nfrScale" ? 3 : 5;
       const current = Number(task.properties[axis] ?? 0);
       const next = current + 1 > maxVal ? 0 : current + 1;
       await upsertNode(
-        { id: taskId, type: "Task", properties: { ...task.properties, [axis]: next } },
+        { id: taskId, type: "Task", properties: { ...task.properties, [axis]: next, dirty: true } },
         { actorId: "human-user" },
       );
+      await markHumanDirty(taskId);
     }
   };
 
   const handleDeleteTask = async (taskId: string) => {
     if (!window.confirm(isEs ? "¿Eliminar esta tarea?" : "Delete this task?")) return;
+    await markParentBeforeDelete(taskId);
     const connectedEdges = edges.filter((e) => e.from === taskId || e.to === taskId);
     for (const edge of connectedEdges) {
       await deleteEdge(edge.id, { actorId: "human-user" });
@@ -412,7 +461,7 @@ export function App() {
     if (!title) return;
     const desc = window.prompt(isEs ? "Descripción detallada:" : "Detailed Description:", "")?.trim() ?? "";
 
-    await upsertNode(
+    const assumptionId = await upsertNode(
       {
         type: "Assumption",
         properties: {
@@ -420,10 +469,12 @@ export function App() {
           description: desc,
           status: "pending",
           raisedBy: "human",
+          dirty: true,
         },
       },
       { actorId: "human-user" },
     );
+    await markHumanDirty(assumptionId);
   };
 
   const handleEditAssumption = async (assumptionId: string) => {
@@ -434,13 +485,15 @@ export function App() {
     const desc = window.prompt(isEs ? "Editar descripción:" : "Edit Description:", String(assump.properties.description ?? ""))?.trim() ?? "";
 
     await upsertNode(
-      { id: assumptionId, type: "Assumption", properties: { ...assump.properties, title, description: desc } },
+      { id: assumptionId, type: "Assumption", properties: { ...assump.properties, title, description: desc, dirty: true } },
       { actorId: "human-user" },
     );
+    await markHumanDirty(assumptionId);
   };
 
   const handleDeleteAssumption = async (assumptionId: string) => {
     if (!window.confirm(isEs ? "¿Eliminar esta suposición?" : "Delete this assumption?")) return;
+    await markParentBeforeDelete(assumptionId);
     await deleteNode(assumptionId, { actorId: "human-user" });
   };
 
@@ -453,17 +506,19 @@ export function App() {
     const category = (window.prompt(isEs ? "Categoría (business/technical):" : "Category (business/technical):", "business")?.trim().toLowerCase() || "business") as "business" | "technical";
     const mitigation = window.prompt(isEs ? "Estrategia de Mitigación:" : "Mitigation Strategy:", "")?.trim() ?? "";
 
-    await upsertNode(
+    const riskId = await upsertNode(
       {
         type: "Risk",
-        properties: { title, description: desc, severity, category, mitigation },
+        properties: { title, description: desc, severity, category, mitigation, dirty: true },
       },
       { actorId: "human-user" },
     );
+    await markHumanDirty(riskId);
   };
 
   const handleDeleteRisk = async (riskId: string) => {
     if (!window.confirm(isEs ? "¿Eliminar este riesgo?" : "Delete this risk?")) return;
+    await markParentBeforeDelete(riskId);
     await deleteNode(riskId, { actorId: "human-user" });
   };
 
@@ -478,10 +533,12 @@ export function App() {
         properties: {
           ...c4.properties,
           markdown: c4DraftMarkdown,
+          dirty: true,
         },
       },
       { actorId: "human-user" },
     );
+    await markHumanDirty(c4Id);
     setEditingC4Id(null);
   };
 
@@ -691,6 +748,44 @@ export function App() {
           </button>
         </div>
 
+        <div className="revise-row">
+          <input
+            type="text"
+            className="prompt-input"
+            data-testid="revise-message"
+            placeholder={
+              isEs
+                ? "Nota para el equipo (opcional): qué deben considerar al revisar los nodos sucios..."
+                : "Note for the crew (optional): what they should consider when revising dirty nodes..."
+            }
+            value={reviseMessage}
+            onChange={(e) => setReviseMessage(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && void handleReviseDirty()}
+            disabled={isSubmitting || dirtyCount === 0}
+          />
+          <button
+            type="button"
+            className="btn-action"
+            data-testid="revise-dirty"
+            disabled={isSubmitting || !canReviseDirty}
+            onClick={() => void handleReviseDirty()}
+            title={
+              dirtyCount === 0
+                ? isEs
+                  ? "No hay nodos sucios"
+                  : "No dirty nodes"
+                : isEs
+                  ? "Revisar nodos sucios con Gestor ↔ Arquitecto"
+                  : "Revise dirty nodes with Manager ↔ Architect"
+            }
+          >
+            ♻️{" "}
+            {isEs
+              ? `Revisar nodos sucios${dirtyCount > 0 ? ` (${dirtyCount})` : ""}`
+              : `Revise dirty nodes${dirtyCount > 0 ? ` (${dirtyCount})` : ""}`}
+          </button>
+        </div>
+
         <div className="suggestions">
           <span>{isEs ? "Sugerencias:" : "Try:"}</span>
           {suggestions.map((s) => (
@@ -750,6 +845,11 @@ export function App() {
               ? "Revisando..."
               : "Reviewing..."}
           </span>
+          {dirtyCount > 0 && (
+            <span className="badge badge-dirty">
+              ✏️ {isEs ? `${dirtyCount} sin revisar` : `${dirtyCount} dirty — not revised`}
+            </span>
+          )}
         </div>
       </div>
 
@@ -818,10 +918,18 @@ export function App() {
           <div className="item-list">
             {epics.map((epic) => {
               const epicFeats = features.filter((f) => f.properties.epicTitle === epic.properties.title);
+              const epicDirty = epic.properties.dirty === true;
               return (
-                <div key={epic.id} className="card">
+                <div key={epic.id} className={`card ${epicDirty ? "dirty" : ""}`}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                    <div className="card-title">{String(epic.properties.title)}</div>
+                    <div className="card-title">
+                      {String(epic.properties.title)}
+                      {epicDirty && (
+                        <span className="badge badge-dirty" style={{ marginLeft: "8px" }}>
+                          {isEs ? "Sin revisar" : "Dirty"}
+                        </span>
+                      )}
+                    </div>
                     <div style={{ display: "flex", gap: "4px" }}>
                       <button type="button" className="btn-icon" onClick={() => handleEditEpic(epic.id)} title="Edit Epic">
                         ✏️
@@ -854,7 +962,7 @@ export function App() {
                           key={feat.id}
                           style={{
                             background: "rgba(6, 182, 212, 0.08)",
-                            borderLeft: "3px solid #06b6d4",
+                            borderLeft: `3px solid ${feat.properties.dirty === true ? "var(--warning)" : "#06b6d4"}`,
                             padding: "6px 8px",
                             borderRadius: "4px",
                             display: "flex",
@@ -863,7 +971,14 @@ export function App() {
                           }}
                         >
                           <div>
-                            <div style={{ fontWeight: 600, fontSize: "13px" }}>{String(feat.properties.title)}</div>
+                            <div style={{ fontWeight: 600, fontSize: "13px" }}>
+                              {String(feat.properties.title)}
+                              {feat.properties.dirty === true && (
+                                <span className="badge badge-dirty" style={{ marginLeft: "6px" }}>
+                                  {isEs ? "Sin revisar" : "Dirty"}
+                                </span>
+                              )}
+                            </div>
                             <div style={{ fontSize: "12px", color: "var(--text-muted)" }}>
                               {String(feat.properties.description)}
                             </div>
@@ -911,10 +1026,18 @@ export function App() {
           {/* C4 Architecture Models with Markdown Editor */}
           {c4Models.map((c4) => {
             const isEditingThis = editingC4Id === c4.id;
+            const c4Dirty = c4.properties.dirty === true;
             return (
-              <div key={c4.id} className="card">
+              <div key={c4.id} className={`card ${c4Dirty ? "dirty" : ""}`}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div className="card-title">🏛️ {String(c4.properties.title)} ({String(c4.properties.level)})</div>
+                  <div className="card-title">
+                    🏛️ {String(c4.properties.title)} ({String(c4.properties.level)})
+                    {c4Dirty && (
+                      <span className="badge badge-dirty" style={{ marginLeft: "8px" }}>
+                        {isEs ? "Sin revisar" : "Dirty"}
+                      </span>
+                    )}
+                  </div>
                   <button
                     type="button"
                     className="btn-small"
@@ -970,9 +1093,10 @@ export function App() {
             {tasks.map((task) => {
               const status = String(task.properties.status ?? "todo");
               const isDone = status === "done";
+              const taskDirty = task.properties.dirty === true;
 
               return (
-                <div key={task.id} className={`card ${isDone ? "done" : ""}`}>
+                <div key={task.id} className={`card ${isDone ? "done" : ""} ${taskDirty ? "dirty" : ""}`}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                       <button
@@ -985,6 +1109,11 @@ export function App() {
                       </button>
                       <span className="card-title" style={{ textDecoration: isDone ? "line-through" : "none" }}>
                         {String(task.properties.title)}
+                        {taskDirty && (
+                          <span className="badge badge-dirty" style={{ marginLeft: "8px" }}>
+                            {isEs ? "Sin revisar" : "Dirty"}
+                          </span>
+                        )}
                       </span>
                     </div>
 
@@ -1114,7 +1243,9 @@ export function App() {
                   style={{
                     background: "#090d16",
                     border: `1px solid ${
-                      status === "approved"
+                      assump.properties.dirty === true
+                        ? "var(--warning)"
+                        : status === "approved"
                         ? "var(--success)"
                         : status === "rejected"
                         ? "var(--danger)"
@@ -1126,7 +1257,14 @@ export function App() {
                   }}
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                    <div style={{ fontWeight: 600 }}>{String(assump.properties.title)}</div>
+                    <div style={{ fontWeight: 600 }}>
+                      {String(assump.properties.title)}
+                      {assump.properties.dirty === true && (
+                        <span className="badge badge-dirty" style={{ marginLeft: "6px" }}>
+                          {isEs ? "Sin revisar" : "Dirty"}
+                        </span>
+                      )}
+                    </div>
                     <div style={{ display: "flex", gap: "4px" }}>
                       <button type="button" className="btn-icon" onClick={() => handleEditAssumption(assump.id)}>
                         ✏️
@@ -1224,7 +1362,14 @@ export function App() {
                 }}
               >
                 <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <div style={{ fontWeight: 600 }}>{String(risk.properties.title)}</div>
+                  <div style={{ fontWeight: 600 }}>
+                    {String(risk.properties.title)}
+                    {risk.properties.dirty === true && (
+                      <span className="badge badge-dirty" style={{ marginLeft: "6px" }}>
+                        {isEs ? "Sin revisar" : "Dirty"}
+                      </span>
+                    )}
+                  </div>
                   <button type="button" className="btn-icon" onClick={() => handleDeleteRisk(risk.id)}>
                     🗑️
                   </button>

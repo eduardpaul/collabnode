@@ -1,6 +1,7 @@
 import { AzureChatOpenAI, ChatOpenAI } from "@langchain/openai";
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import type { z } from "zod";
 import type { PlannerLanguage } from "./types.ts";
 
 /**
@@ -61,4 +62,18 @@ export function getChatModel(): BaseChatModel | null {
   }
 
   return null;
+}
+
+/**
+ * Bind a Zod schema onto the chat model so the provider enforces the shape
+ * (OpenAI/Azure json_schema, Gemini function-calling) instead of scraping JSON
+ * out of free-form text.
+ */
+export async function invokeStructured<T extends z.ZodTypeAny>(
+  model: BaseChatModel,
+  schema: T,
+  prompt: string,
+  name: string,
+): Promise<z.infer<T>> {
+  return model.withStructuredOutput(schema, { name }).invoke(prompt) as Promise<z.infer<T>>;
 }

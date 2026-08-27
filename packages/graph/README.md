@@ -26,6 +26,7 @@ await store.apply(ops);
 | --- | --- |
 | Store seam | `GraphStore`, `GraphSearchModes`, `GraphStoreError`, `InMemoryGraphStore` |
 | Snapshots & ops | `snapshotToOps`, `diffSnapshots`, `applyPropertyPatch`, `stampMeta`, `emptyMeta`, `nodeTags` |
+| Walk | `walk` — BFS over a snapshot (`edgeTypes`, `direction`, `depth`, `limit`) |
 | History | `selectHistory`, `trimHistory`, `compareHistory`, `cloneHistoryEntry`, `historyIndicesToDrop` |
 | Search | `searchTerms`, `searchableProperties`, `boostTiers`, `flattenSearchValue`, `joinedTerms`, `fold`, `squash` |
 | Vectors | `EmbeddingProvider`, `cosineSimilarity`, `vectorProperties`, `vectorText`, `vectorSlug`, `aboveFloor` |
