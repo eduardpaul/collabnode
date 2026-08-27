@@ -57,6 +57,9 @@
     },
     {
       "path": "packages/bench"
+    },
+    {
+      "path": "packages/deepagents"
     }
   ]
 }

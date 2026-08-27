@@ -419,6 +419,7 @@ export const rawAgent = z.strictObject({
   systemPrompt: i18nString.optional(),
   tools: z.array(z.string()).optional(),
   nodes: rawAgentNodes.optional(),
+  internalPlanning: z.boolean().optional(),
 });
 
 export const rawTools = z.strictObject({

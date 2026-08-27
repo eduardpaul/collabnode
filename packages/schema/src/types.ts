@@ -258,6 +258,8 @@ export interface AgentDef {
   tools?: string[];
   /** Per-node-type read/write reach for this role. */
   nodes?: AgentNodePolicy;
+  /** Whether to enable internal task planning / todo list for this agent. */
+  internalPlanning?: boolean;
 }
 
 export interface ToolsPolicyDef {

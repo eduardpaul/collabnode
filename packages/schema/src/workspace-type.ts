@@ -308,6 +308,7 @@ export function parseWorkspaceTypeDocument(source: string, origin = "<yaml>"): W
         a.nodes && (a.nodes.readOnly?.length || a.nodes.hidden?.length)
           ? { readOnly: a.nodes.readOnly, hidden: a.nodes.hidden }
           : undefined,
+      internalPlanning: a.internalPlanning,
     }));
     tools = {
       expose: raw.tools.expose,

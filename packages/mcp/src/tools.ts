@@ -143,7 +143,7 @@ function createNodeRefZod(language?: SupportedLanguage | string): ZodType {
   const t = getLocale(language);
   return z.union([
     z.string().describe(t.tools.nodeRef.idOrPrefix),
-    z.record(z.string(), z.unknown()).describe(t.tools.nodeRef.identityObject),
+    z.looseObject({}).describe(t.tools.nodeRef.identityObject),
   ]);
 }
 
@@ -160,7 +160,7 @@ function createNodeRefZod(language?: SupportedLanguage | string): ZodType {
  */
 function batchOpsZod(language?: SupportedLanguage | string): ZodType {
   const t = getLocale(language);
-  const properties = z.record(z.string(), z.unknown()).optional();
+  const properties = z.looseObject({}).optional();
   const endpoint = z.union([
     z.string().describe(t.tools.nodeRef.idOrPrefix),
     z.object({ ref: z.string() }),
@@ -194,7 +194,7 @@ function batchOpsZod(language?: SupportedLanguage | string): ZodType {
  * `schemaHash` are optional because a caller hands back what it was given, and
  * a diff is over nodes and edges either way.
  */
-const propertyMapZod = z.record(z.string(), z.unknown());
+const propertyMapZod = z.looseObject({});
 const metaZod = z.looseObject({});
 const snapshotZod = z.object({
   schemaId: z.string().optional(),

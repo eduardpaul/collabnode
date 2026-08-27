@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "skipLibCheck": true
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../schema" },
+    { "path": "../runtime" },
+    { "path": "../mcp" }
+  ]
+}
