@@ -78,10 +78,12 @@ export { canonicalJson, sha256Canonical, sha256Hex } from "./hash.js";
 export { compileTemplate, validateParams } from "./template.js";
 export {
   ALL_NODE_TYPES,
+  ALL_TOOLS,
   nodeAccessFrom,
   openNodeAccess,
   redactSchema,
   resolveNodeAccess,
+  toolListAllowsAll,
   type NodeAccessPolicy,
 } from "./agent-policy.js";
 export {

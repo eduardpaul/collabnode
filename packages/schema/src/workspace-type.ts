@@ -173,12 +173,23 @@ export function validateWorkspaceType(wsType: WorkspaceType): void {
 }
 
 /**
+ * YAML aliases cannot be empty (`- *` is a parse error). Quote a bare `*`
+ * list item so `tools.expose: [ * ]` / `- *` reads as the all-tools wildcard
+ * (and the same token in `readOnly` / `hidden` / `agents[].tools`).
+ *
+ * Only block-style items are rewritten; a `*` inside a string is left alone.
+ */
+export function quoteBareStarListItems(source: string): string {
+  return source.replace(/^([ \t]*-[ \t]+)\*([ \t]*(?:#.*)?)$/gm, '$1"*"$2');
+}
+
+/**
  * Parses a YAML document into a WorkspaceType bundle.
  */
 export function parseWorkspaceTypeDocument(source: string, origin = "<yaml>"): WorkspaceType {
   let parsed: unknown;
   try {
-    parsed = parseYaml(source, { prettyErrors: true });
+    parsed = parseYaml(quoteBareStarListItems(source), { prettyErrors: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new SchemaError(`invalid YAML in ${origin}: ${message}`);

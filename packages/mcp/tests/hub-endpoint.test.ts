@@ -129,6 +129,67 @@ describe("MCP Hub Endpoint, Policy & Named Tools", () => {
     await hub.close();
   });
 
+  it("exposes every generated tool when expose is *", async () => {
+    const allType = parseWorkspaceTypeDocument(`
+type: retro
+version: 1
+schema:
+  nodes:
+    Column:
+      properties:
+        title: { type: string, required: true }
+    Item:
+      properties:
+        body: { type: string, required: true }
+  edges:
+    IN_COLUMN:
+      from: [Item]
+      to: [Column]
+tools:
+  expose:
+    - *
+  named:
+    add_item:
+      description: "Add a retro item directly into a column"
+      creates: Item
+      into: IN_COLUMN
+  agents:
+    - role: facilitator
+      actorId: bot-facilitator
+      tools:
+        - *
+`);
+    const hub = await createHub({ sweepIntervalMs: 0 });
+    hub.define(allType);
+
+    const ws = await hub.open("retro", {
+      id: "retro-mcp-all",
+      params: {},
+      actorId: "ada",
+    });
+
+    const tools = buildTools(ws.session.schema, ws.session, {
+      policy: ws.type.tools,
+    });
+    const toolNames = tools.map((t) => t.name);
+
+    expect(toolNames).toContain("graph_search");
+    expect(toolNames).toContain("graph_query");
+    expect(toolNames).toContain("graph_delete_node");
+    expect(toolNames).toContain("upsert_node_Column");
+    expect(toolNames).toContain("upsert_node_Item");
+    expect(toolNames).toContain("upsert_edge_IN_COLUMN");
+    expect(toolNames).toContain("add_item");
+
+    const facilitatorTools = buildTools(ws.session.schema, ws.session, {
+      policy: ws.type.tools,
+      agentRole: "facilitator",
+    });
+    expect(facilitatorTools.map((t) => t.name)).toEqual(toolNames);
+
+    await hub.close();
+  });
+
   it("scopes tools and prompts for specific agent roles", async () => {
     const retroType = parseWorkspaceTypeDocument(RETRO_TYPE_YAML);
     const hub = await createHub({ sweepIntervalMs: 0 });

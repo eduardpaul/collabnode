@@ -255,6 +255,10 @@ export interface AgentDef {
   actorId: string;
   description?: I18nString;
   systemPrompt?: I18nString;
+  /**
+   * Allowlist of tool names this role may call. `*` keeps every tool that
+   * survived `tools.expose`; omit or leave empty for the same default.
+   */
   tools?: string[];
   /** Per-node-type read/write reach for this role. */
   nodes?: AgentNodePolicy;
@@ -263,6 +267,11 @@ export interface AgentDef {
 }
 
 export interface ToolsPolicyDef {
+  /**
+   * Allowlist of generated MCP tool names (`graph_*`, `upsert_node_*`,
+   * `upsert_edge_*`, …). `*` exposes every generated tool — the same default
+   * as omitting the list. Named tools in `named` are always added on top.
+   */
   expose?: string[];
   named?: Record<string, NamedToolDef>;
   agents?: AgentDef[];

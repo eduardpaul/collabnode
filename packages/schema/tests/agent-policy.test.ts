@@ -6,6 +6,7 @@ import {
   redactSchema,
   resolveNodeAccess,
   SchemaError,
+  toolListAllowsAll,
 } from "../src/index.ts";
 
 const YAML = `
@@ -73,6 +74,14 @@ describe("agent node policy", () => {
     expect(auditor.isEdgeHidden("ASSIGNED_TO")).toBe(false);
     // …but ASSIGNED_TO starts at a read-only Task, so it cannot be written.
     expect(auditor.canWriteEdge("ASSIGNED_TO")).toBe(false);
+  });
+
+  it("treats *, empty, and omitted tool lists as allow-all", () => {
+    expect(toolListAllowsAll(undefined)).toBe(true);
+    expect(toolListAllowsAll([])).toBe(true);
+    expect(toolListAllowsAll(["*"])).toBe(true);
+    expect(toolListAllowsAll(["graph_search", "*"])).toBe(true);
+    expect(toolListAllowsAll(["graph_search"])).toBe(false);
   });
 
   it("expands '*' and lets hidden win the overlap", () => {

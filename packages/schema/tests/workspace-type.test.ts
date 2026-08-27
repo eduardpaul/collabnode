@@ -9,6 +9,7 @@ import {
   SchemaError,
   workspaceTypeId,
 } from "../src/index.ts";
+import { quoteBareStarListItems } from "../src/workspace-type.ts";
 import { loadWorkspaceTypeFile } from "../src/node.ts";
 
 const WORKSPACE_TYPE_YAML = `
@@ -160,6 +161,55 @@ template:
     - type: MissingNode
 `),
     ).toThrow(/MissingNode/);
+  });
+
+  it("quotes a bare * list item so YAML can parse it", () => {
+    expect(quoteBareStarListItems("  - *\n  - graph_search\n")).toBe(
+      '  - "*"\n  - graph_search\n',
+    );
+    expect(quoteBareStarListItems("  - *  # all\n")).toBe('  - "*"  # all\n');
+    expect(quoteBareStarListItems('body: "[*] is a glob"\n')).toBe('body: "[*] is a glob"\n');
+  });
+
+  it("parses a bare * list item as the all-tools wildcard", () => {
+    const wsType = parseWorkspaceTypeDocument(`
+type: board
+version: 1
+schema:
+  nodes:
+    Task:
+      properties:
+        title: { type: string }
+tools:
+  expose:
+    - *
+  agents:
+    - role: worker
+      actorId: worker-bot
+      tools:
+        - *
+      nodes:
+        readOnly:
+          - *
+`);
+    expect(wsType.tools?.expose).toEqual(["*"]);
+    expect(wsType.tools?.agents?.[0]?.tools).toEqual(["*"]);
+    expect(wsType.tools?.agents?.[0]?.nodes?.readOnly).toEqual(["*"]);
+  });
+
+  it("parses a quoted * expose list", () => {
+    const wsType = parseWorkspaceTypeDocument(`
+type: board
+version: 1
+schema:
+  nodes:
+    Task:
+      properties:
+        title: { type: string }
+tools:
+  expose: ["*"]
+`);
+    expect(wsType.tools?.expose).toEqual(["*"]);
   });
 
   it("validates named tool creates/into types against schema", () => {

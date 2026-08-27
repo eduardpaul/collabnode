@@ -9,6 +9,18 @@ import type {
 export const ALL_NODE_TYPES = "*";
 
 /**
+ * `*` in `tools.expose` or `agents[].tools` means every generated tool.
+ * YAML aliases cannot be empty, so write it quoted (`- "*"`) or as a bare
+ * list item (`- *`); the latter is quoted at parse time.
+ */
+export const ALL_TOOLS = "*";
+
+/** True when a tool-name list is absent, empty, or includes `*`. */
+export function toolListAllowsAll(list: string[] | undefined): boolean {
+  return !list || list.length === 0 || list.includes(ALL_TOOLS);
+}
+
+/**
  * One agent role's node-type reach, resolved against a concrete schema so
  * callers never have to re-expand `*` or re-apply the hidden-beats-read-only
  * precedence.

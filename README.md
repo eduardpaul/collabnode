@@ -551,6 +551,23 @@ and the caller's role applies the node policy below. `?lang=` / `Accept-Language
 picks the language for tool descriptions and prompts, falling back through the
 bare subtag (`es-MX` → `es`) to `en`.
 
+```yaml
+tools:
+  expose:
+    - *                    # every generated graph / upsert tool (the default)
+  # or a narrower allowlist:
+  # - graph_search
+  # - graph_neighbors
+  named:
+    add_item:
+      creates: Item
+      into: IN_COLUMN
+```
+
+`*` in `expose` (and in `agents[].tools`) means every generated tool. Omit the
+list for the same default. YAML aliases cannot be empty, so a bare `- *` is
+quoted at parse time; `- "*"` and `expose: ["*"]` work too.
+
 ### Per-agent node policy
 
 A workspace type can give each agent role a different reach over node types. Two

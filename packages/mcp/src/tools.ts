@@ -30,6 +30,7 @@ import {
   resolveGuidelines,
   resolveI18nString,
   resolveNodeAccess,
+  toolListAllowsAll,
   type GraphSchema,
   type NamedToolDef,
   type NodeAccessPolicy,
@@ -849,8 +850,9 @@ export function buildTools(
     );
   }
 
-  // Filter generic tools if policy.expose is defined
-  if (policy?.expose && policy.expose.length > 0) {
+  // Filter generated tools if policy.expose is a specific allowlist.
+  // `*` (or an omitted/empty list) keeps every generated tool.
+  if (policy?.expose && !toolListAllowsAll(policy.expose)) {
     const exposeSet = new Set(policy.expose);
     tools = tools.filter((tool) => exposeSet.has(tool.name));
   }
@@ -879,7 +881,7 @@ export function buildTools(
     const agent = policy.agents.find(
       (a) => a.role === options.agentRole || a.actorId === options.agentRole,
     );
-    if (agent?.tools && agent.tools.length > 0) {
+    if (agent && !toolListAllowsAll(agent.tools)) {
       const allowed = new Set(agent.tools);
       tools = tools.filter((tool) => allowed.has(tool.name));
     }
