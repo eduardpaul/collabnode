@@ -113,36 +113,53 @@ schema:
         label: "{title}"
         color: "#06b6d4"
 
-    C4Model:
+    C4DiagramElement:
       description:
-        en: C4 architecture diagram element or level
-        es: Elemento o nivel de diagrama de arquitectura C4
+        en: One C4 element. The `type` property is Person, System, Boundary, Container, or Component. `external` renders as Mermaid _Ext.
+        es: Un elemento C4. La propiedad `type` es Person, System, Boundary, Container o Component. `external` se dibuja como Mermaid _Ext.
       identity:
-        from: [title]
+        from: [type, title]
       properties:
         title:
           type: string
           required: true
-        level:
+          search:
+            boost: 6
+        type:
           type: enum
-          values: [context, container, component]
-          default: container
-        markdown:
+          values: [Person, System, Boundary, Container, Component]
+          required: true
+          description:
+            en: C4 element kind. Boundary is grouping only; System is software. Never mix them.
+            es: Clase de elemento C4. Boundary solo agrupa; System es software. No los mezcles.
+        description:
           type: text
-        dirty:
+        technology:
+          type: string
+        external:
           type: boolean
           default: false
           description:
-            en: Human-changed, not yet revised by the Manager/Architect crew
-            es: Cambiado por el usuario, aún no revisado por el equipo Gestor/Arquitecto
+            en: When true, Mermaid uses Person_Ext / System_Ext / Container_Ext / ContainerDb_Ext
+            es: Si es true, Mermaid usa Person_Ext / System_Ext / Container_Ext / ContainerDb_Ext
+        dirty:
+          type: boolean
+          default: false
       ui:
         label: "{title}"
         color: "#8b5cf6"
 
     Task:
       description:
-        en: Actionable implementation task scored on 6 estimation axes
-        es: Tarea ejecutable de implementación calificada en 6 ejes de estimación
+        en: Actionable implementation task with What/How description and Fibonacci functional/technical points
+        es: Tarea ejecutable de implementación con descripción Qué/Cómo y puntos Fibonacci funcionales/técnicos
+      guidelines:
+        en:
+          - functionalPoints and technicalPoints MUST be a Fibonacci integer (1, 2, 3, 5, 8, 13, or 21). Never write a sentence there.
+          - Put What (functional outcome) and How (technical approach) in description, using the labels "What:" and "How:".
+        es:
+          - functionalPoints y technicalPoints DEBEN ser un entero Fibonacci (1, 2, 3, 5, 8, 13 o 21). Nunca escribas una frase ahí.
+          - Pon el Qué (resultado funcional) y el Cómo (enfoque técnico) en description, con las etiquetas "Qué:" y "Cómo:".
       identity:
         from: [title]
       properties:
@@ -153,18 +170,29 @@ schema:
             boost: 6
         description:
           type: text
+          description:
+            en: Must include What (functional outcome / user journey) and How (technical approach, infrastructure, integrations)
+            es: Debe incluir Qué (resultado funcional / flujo de usuario) y Cómo (enfoque técnico, infraestructura, integraciones)
         featureTitle:
           type: string
         functionalPoints:
-          type: string
+          type: number
+          integer: true
+          default: 1
+          min: 1
+          max: 21
           description:
-            en: The What (business value / user journeys)
-            es: El Qué (valor de negocio / flujo de usuario)
+            en: INTEGER Fibonacci story points only (1, 2, 3, 5, 8, 13, or 21). Never a sentence. 
+            es: SOLO un entero Fibonacci (1, 2, 3, 5, 8, 13 o 21). Nunca una frase.
         technicalPoints:
-          type: string
+          type: number
+          integer: true
+          default: 1
+          min: 1
+          max: 21
           description:
-            en: The How (infrastructure, tech debt, integrations)
-            es: El Cómo (infraestructura, deuda técnica, integraciones)
+            en: INTEGER Fibonacci story points only (1, 2, 3, 5, 8, 13, or 21). Never a sentence.
+            es: SOLO un entero Fibonacci (1, 2, 3, 5, 8, 13 o 21). Nunca una frase. 
         complexity:
           type: number
           default: 1
@@ -189,10 +217,6 @@ schema:
           description:
             en: 0 (Low/Internal) to 3 (Extreme compliance/scale)
             es: 0 (Bajo/Interno) a 3 (Extrema escala/cumplimiento)
-        status:
-          type: enum
-          values: [todo, doing, done]
-          default: todo
         dirty:
           type: boolean
           default: false
@@ -284,9 +308,17 @@ schema:
       from: [Epic, Feature, Task]
       to: [Assumption]
       directed: true
+    CONTAINS:
+      from: [C4DiagramElement]
+      to: [C4DiagramElement]
+      directed: true
+    USES:
+      from: [C4DiagramElement]
+      to: [C4DiagramElement]
+      directed: true
     TARGETS_C4:
       from: [Task]
-      to: [C4Model]
+      to: [C4DiagramElement]
       directed: true
 
 params:
@@ -319,3 +351,64 @@ projection: memory
 retention:
   onEnd: keep
   artifact: required
+
+tools:
+  expose:
+    - *  # every generated graph / upsert tool
+
+  agents:
+    - role: manager
+      actorId: ai-manager
+      internalPlanning: false
+      description:
+        en: AI Product Manager responsible for business requirements, epics, features, and business risks.
+        es: Gestor de Producto IA responsable de requerimientos de negocio, épicas, features y riesgos.
+      systemPrompt:
+        en: |
+          You are an AI Product Manager collaborating on this graph in real time.
+          - Analyze the user requirements and create 2-3 high-level Epics using upsert_node_Epic.
+          - Break down each Epic into 2 concrete Features using upsert_node_Feature and link them with upsert_edge_HAS_FEATURE.
+          - Identify 1-2 business risks and link them with upsert_node_Risk and upsert_edge_HAS_RISK.
+          - If iteration is 1 or this is the initial plan, create ONE critical assumption for human validation using upsert_node_Assumption with status: pending and raisedBy: manager.
+          - Update SolutionState to signal your agreement (managerAgrees: true).
+        es: |
+          Eres un Gerente de Producto IA colaborando en este grafo en tiempo real.
+          - Analiza los requerimientos del usuario y crea 2-3 Épicas usando upsert_node_Epic.
+          - Desglosa cada Épica en 2 Features concretos usando upsert_node_Feature y enlázalos con upsert_edge_HAS_FEATURE.
+          - Identifica 1-2 riesgos de negocio y enlázalos con upsert_node_Risk y upsert_edge_HAS_RISK.
+          - Si es la iteración 1 o el plan inicial, plantea UNA suposición crítica para validación humana usando upsert_node_Assumption con status: pending y raisedBy: manager.
+          - Actualiza SolutionState para señalar tu acuerdo (managerAgrees: true).
+      nodes:
+        readOnly: [C4DiagramElement, Task]
+
+    - role: architect
+      actorId: ai-architect
+      internalPlanning: false
+      description:
+        en: AI Software Architect responsible for C4 architecture diagrams, Fibonacci-scored tasks, and technical risks.
+        es: Arquitecto de Software IA responsable de diagramas C4, tareas con puntos Fibonacci y riesgos técnicos.
+      systemPrompt:
+        en: |
+          You are an AI Software Architect collaborating on this graph in real time.
+          - Inspect epics and features using graph_list or graph_search.
+          - Create C4 with upsert_node_C4DiagramElement. One node type; set properties.type to Person, System, Boundary, Container, or Component. Boundary is grouping only (System_Boundary), never a software system. System is software. external:true renders as Person_Ext / System_Ext / Container_Ext.
+          - Link Boundary to its Containers with upsert_edge_CONTAINS. Link Person/Container interactions with upsert_edge_USES.
+          - Create technical tasks for features using upsert_node_Task. Description MUST include What (functional outcome) and How (technical approach). Score functionalPoints and technicalPoints as Fibonacci story points (1, 2, 3, 5, 8, 13, 21), plus complexity, uncertainty, friction, nfrScale. Tasks have no status.
+          - Link Features to Tasks using upsert_edge_HAS_TASK.
+          - Link Tasks to C4 elements with upsert_edge_TARGETS_C4.
+          - Identify technical risks and link them with upsert_node_Risk and upsert_edge_HAS_RISK.
+          - Consult Microsoft Learn MCP tools when Azure/Microsoft services or libraries are involved.
+          - Update SolutionState to signal your agreement (architectAgrees: true).
+        es: |
+          Eres un Arquitecto de Software IA colaborando en este grafo en tiempo real.
+          - Inspecciona epics y features usando graph_list o graph_search.
+          - Crea C4 con upsert_node_C4DiagramElement. Un solo tipo de nodo; properties.type es Person, System, Boundary, Container o Component. Boundary solo agrupa (System_Boundary), nunca es un sistema de software. System es software. external:true se dibuja Person_Ext / System_Ext / Container_Ext.
+          - Enlaza Boundary a sus Containers con upsert_edge_CONTAINS. Enlaza interacciones Person/Container con upsert_edge_USES.
+          - Crea tareas técnicas con upsert_node_Task. La descripción DEBE incluir Qué (resultado funcional) y Cómo (enfoque técnico). functionalPoints y technicalPoints son puntos Fibonacci (1, 2, 3, 5, 8, 13, 21), más complexity, uncertainty, friction, nfrScale. Las tareas no tienen status.
+          - Enlaza Features a Tasks usando upsert_edge_HAS_TASK.
+          - Enlaza Tasks a elementos C4 con upsert_edge_TARGETS_C4.
+          - Identifica riesgos técnicos y enlázalos con upsert_node_Risk y upsert_edge_HAS_RISK.
+          - Consulta herramientas de Microsoft Learn cuando apliquen servicios o bibliotecas Azure/Microsoft.
+          - Actualiza SolutionState para señalar tu acuerdo (architectAgrees: true).
+      nodes:
+        readOnly: [Epic]
