@@ -1,4 +1,5 @@
 import { tool, type StructuredToolInterface } from "@langchain/core/tools";
+import { z } from "zod";
 import {
   StreamableHttpMcpClient,
   stringifyMcpToolResult,
@@ -17,20 +18,12 @@ export interface LoadedMcpTools {
 }
 
 function emptyTools(): LoadedMcpTools {
-  return {
-    tools: [],
-    instructions: "",
-    serverName: "",
-    close: async () => {},
-  };
+  return { tools: [], instructions: "", serverName: "", close: async () => {} };
 }
 
 function learnMcpEnabled(): boolean {
   const flag = process.env.MICROSOFT_LEARN_MCP?.trim().toLowerCase();
-  if (flag === "0" || flag === "false" || flag === "off") {
-    return false;
-  }
-  return true;
+  return flag !== "0" && flag !== "false" && flag !== "off";
 }
 
 export function microsoftLearnMcpUrl(): string {
@@ -42,14 +35,9 @@ export function microsoftLearnMcpUrl(): string {
   return url.toString();
 }
 
-import { z } from "zod";
-
-/** Last-resort shape when a server advertises a tool with no input schema. */
 const OPAQUE_ARGS = z.object({}).passthrough();
 
 function wrapMcpTool(client: StreamableHttpMcpClient, def: McpToolDef): StructuredToolInterface {
-  // The server's own `inputSchema` is the contract. Hardcoding shapes here
-  // would send the wrong parameters to every tool but the ones we guessed.
   const advertised = def.inputSchema;
   const schema =
     advertised && typeof advertised === "object" && advertised.type === "object"
@@ -69,10 +57,6 @@ function wrapMcpTool(client: StreamableHttpMcpClient, def: McpToolDef): Structur
   );
 }
 
-/**
- * Connect to Microsoft Learn MCP and expose its tools as LangChain tools.
- * Failures return an empty set so planning still runs without docs.
- */
 export async function loadMicrosoftLearnTools(options?: {
   url?: string;
   fetchFn?: FetchFn;
@@ -91,9 +75,8 @@ export async function loadMicrosoftLearnTools(options?: {
   try {
     const init = await client.initialize();
     const defs = await client.listTools();
-    const tools = defs.map((def) => wrapMcpTool(client, def));
     return {
-      tools,
+      tools: defs.map((def) => wrapMcpTool(client, def)),
       instructions: init.instructions?.trim() ?? "",
       serverName: init.serverInfo?.name ?? "Microsoft Learn MCP Server",
       close: () => client.close(),
@@ -107,12 +90,6 @@ export async function loadMicrosoftLearnTools(options?: {
 
 let sharedTools: Promise<LoadedMcpTools> | undefined;
 
-/**
- * Process-wide Learn MCP connection. The Streamable HTTP client is stateless
- * between calls, so one `initialize` serves every architect turn — reconnecting
- * per turn cost two round-trips and left a session open on every early return.
- * A failed connect is not cached, so a later turn retries.
- */
 export function sharedMicrosoftLearnTools(): Promise<LoadedMcpTools> {
   sharedTools ??= loadMicrosoftLearnTools().then((loaded) => {
     if (loaded.tools.length === 0) {

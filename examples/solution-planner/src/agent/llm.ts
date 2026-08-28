@@ -3,28 +3,13 @@ import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { PlannerLanguage } from "./types.ts";
 
-/**
- * Which model this app talks to, and how it guesses the user's language.
- *
- * Chat-model construction for this app. Structured output is the single-shot
- * helper on `@collabnode/deepagents`; tools and the ReAct loop are Deep Agents.
- * What is left here is genuinely this app's: its credentials, its deployment
- * names, its two languages.
- */
-
-/**
- * Detect language from text input.
- */
 export function detectLanguage(text: string, defaultLang: PlannerLanguage = "en"): PlannerLanguage {
   if (!text) return defaultLang;
-  const spanishPattern = /\b(el|la|los|las|un|una|unos|unas|de|del|en|para|con|por|que|como|es|son|sistema|aplicacion|gestor|usuario|desarrollar|crear|tablero|arquitectura|servicio)\b/i;
+  const spanishPattern =
+    /\b(el|la|los|las|un|una|unos|unas|de|del|en|para|con|por|que|como|es|son|sistema|aplicacion|gestor|usuario|desarrollar|crear|tablero|arquitectura|servicio)\b/i;
   return spanishPattern.test(text) ? "es" : "en";
 }
 
-/**
- * Provider factories. Each returns null when its credentials are absent, so
- * `LLM_PROVIDER` can name one explicitly and auto-detection can walk the list.
- */
 function makeGemini(): BaseChatModel | null {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) return null;
@@ -76,16 +61,8 @@ const PROVIDERS: Record<string, () => BaseChatModel | null> = {
   openai: makeOpenAI,
 };
 
-/** Auto-detect order when LLM_PROVIDER is unset. */
 const AUTO_DETECT_ORDER = [makeAzure, makeOpenAI, makeGemini];
 
-/**
- * Create a chat model instance if API keys are present.
- *
- * `LLM_PROVIDER` (azure | openai | gemini) picks the provider outright — an
- * ambient key for another provider never overrides it. With it unset, the
- * providers are tried in AUTO_DETECT_ORDER.
- */
 export function getChatModel(): BaseChatModel | null {
   const provider = process.env.LLM_PROVIDER?.trim().toLowerCase();
   if (provider) {
@@ -106,4 +83,3 @@ export function getChatModel(): BaseChatModel | null {
   }
   return null;
 }
-

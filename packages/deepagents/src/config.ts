@@ -137,6 +137,7 @@ export function createSubAgentConfig(options: SubAgentConfigOptions): CollabSubA
     extraTools = [],
     excludedTools = [],
     systemPromptSuffix,
+    systemPromptOverride,
     onToolCall,
   } = options;
 
@@ -165,6 +166,7 @@ export function createSubAgentConfig(options: SubAgentConfigOptions): CollabSubA
     documentId: session.id,
     language,
     systemPromptSuffix,
+    systemPromptOverride,
   });
 
   const description = agentDef?.description

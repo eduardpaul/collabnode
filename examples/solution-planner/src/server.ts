@@ -15,19 +15,19 @@ import { fileURLToPath } from "node:url";
 import { createServer as createViteServer } from "vite";
 import { collabnodeTypes } from "collabnode/vite";
 import { config as loadDotEnv } from "dotenv";
-import {
-  startPlannerWorkflow,
-  startRevisionWorkflow,
-  resumePlannerWithValidation,
-  runSingleAgentStep,
-  getPlannerState,
-} from "./agent/graph.ts";
-import { dirtyNodes } from "./agent/dirty.ts";
 import { singletonOfType } from "collabnode";
 import type { PlannerSession } from "./agent/session.ts";
 import type { SolutionPlanner } from "./workspace.types.ts";
 import type { CollabSession } from "@collabnode/runtime";
 import { detectLanguage } from "./agent/llm.ts";
+import {
+  CrewBusyError,
+  NoModelError,
+  crewLogs,
+  crewRunning,
+  dropCrew,
+  runPlannerChat,
+} from "./agent/crew.ts";
 
 loadDotEnv();
 
@@ -163,15 +163,14 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
   if (path === "/api/workspaces" && method === "GET") {
     const records = await hub.list({ typeName: "solution-planner" });
     const list = records.map((rec) => {
-      const state = getPlannerState(rec.id);
       return {
         id: rec.id,
         appName: rec.label ?? String(rec.params?.appName ?? rec.id),
         language: (rec.params?.language as "en" | "es") ?? "en",
-        status: state?.status ?? "idle",
-        iteration: state?.iteration ?? 0,
-        managerAgrees: state?.managerAgrees ?? false,
-        architectAgrees: state?.architectAgrees ?? false,
+        status: "idle",
+        iteration: 0,
+        managerAgrees: false,
+        architectAgrees: false,
         ...plannerStateFromGraph(rec.id),
       };
     });
@@ -236,24 +235,31 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
     return true;
   }
 
-  if (path === "/api/planner/start" && method === "POST") {
+  if (path === "/api/planner/chat" && method === "POST") {
     const payload = parseJson(await readBody(req));
     const wsId = typeof payload?.workspaceId === "string" ? payload.workspaceId : defaultWorkspaceId;
-    const description = typeof payload?.description === "string" ? payload.description.trim() : "";
-    let language = typeof payload?.language === "string" ? (payload.language as "en" | "es") : undefined;
+    const message = typeof payload?.message === "string" ? payload.message.trim() : "";
 
-    if (!description) {
-      fail(res, 400, "description is required");
+    if (!message) {
+      fail(res, 400, "message is required");
       return true;
     }
 
-    if (!language) {
-      language = detectLanguage(description);
-    }
-
     const ws = await hub.open("solution-planner", { id: wsId, actorId: "server" });
-    const result = await startPlannerWorkflow(wsId, planner(ws), description, language);
-    json(res, result);
+    const language = payload?.language === "es" ? "es" : payload?.language === "en" ? "en" : detectLanguage(message);
+
+    try {
+      const result = await runPlannerChat({
+        workspaceId: wsId,
+        session: planner(ws),
+        workspaceType: plannerType,
+        message,
+        language,
+      });
+      json(res, { ok: true, logs: result.logs, ...plannerStateFromGraph(wsId) });
+    } catch (err) {
+      return plannerChatError(res, err);
+    }
     return true;
   }
 
@@ -262,7 +268,7 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
     const wsId = typeof payload?.workspaceId === "string" ? payload.workspaceId : defaultWorkspaceId;
     const assumptionId = typeof payload?.assumptionId === "string" ? payload.assumptionId : "";
     const approved = Boolean(payload?.approved);
-    const comment = typeof payload?.comment === "string" ? payload.comment : undefined;
+    const comment = typeof payload?.comment === "string" ? payload.comment.trim() : "";
 
     if (!assumptionId) {
       fail(res, 400, "assumptionId is required");
@@ -270,40 +276,46 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
     }
 
     const ws = await hub.open("solution-planner", { id: wsId, actorId: "server" });
-    const result = await resumePlannerWithValidation(wsId, planner(ws), {
-      assumptionId,
-      approved,
-      comment,
-    });
-    json(res, result);
-    return true;
-  }
-
-  if (path === "/api/planner/revise" && method === "POST") {
-    const payload = parseJson(await readBody(req));
-    const wsId = typeof payload?.workspaceId === "string" ? payload.workspaceId : defaultWorkspaceId;
-    const ws = await hub.open("solution-planner", { id: wsId, actorId: "server" });
-    const dirty = dirtyNodes(planner(ws).snapshot());
-    if (dirty.length === 0) {
-      fail(res, 400, "no dirty nodes to revise");
+    const session = planner(ws);
+    const assumption = session.snapshot().nodes.find((n) => n.id === assumptionId);
+    if (!assumption || assumption.type !== "Assumption") {
+      fail(res, 404, "assumption not found");
       return true;
     }
 
-    const reviewMessage =
-      typeof payload?.reviewMessage === "string" ? payload.reviewMessage.trim() : "";
-    const result = await startRevisionWorkflow(wsId, planner(ws), reviewMessage || undefined);
-    json(res, result);
-    return true;
-  }
+    await session.upsertNode(
+      {
+        id: assumptionId,
+        type: "Assumption",
+        properties: {
+          ...assumption.properties,
+          status: approved ? "approved" : "rejected",
+          userComment: comment || assumption.properties.userComment,
+        },
+      },
+      { actorId: "human-user" },
+    );
 
-  if (path === "/api/planner/step" && method === "POST") {
-    const payload = parseJson(await readBody(req));
-    const wsId = typeof payload?.workspaceId === "string" ? payload.workspaceId : defaultWorkspaceId;
-    const actor = payload?.actor === "architect" ? "architect" : "manager";
+    const title = String(assumption.properties.title ?? assumptionId);
+    const followUp = approved
+      ? `The human approved assumption "${title}".${comment ? ` Comment: ${comment}` : ""} Continue the plan. Call view_solution_view and delegate remaining technical work to the architect.`
+      : `The human rejected assumption "${title}".${comment ? ` Comment: ${comment}` : ""} Adapt the plan. Call view_solution_view.`;
 
-    const ws = await hub.open("solution-planner", { id: wsId, actorId: "server" });
-    const result = await runSingleAgentStep(wsId, planner(ws), actor);
-    json(res, result);
+    try {
+      const result = await runPlannerChat({
+        workspaceId: wsId,
+        session,
+        workspaceType: plannerType,
+        message: followUp,
+        language: (singletonOfType(session.snapshot(), "SolutionState")?.properties.language === "es"
+          ? "es"
+          : "en"),
+        actor: "user",
+      });
+      json(res, { ok: true, logs: result.logs, ...plannerStateFromGraph(wsId) });
+    } catch (err) {
+      return plannerChatError(res, err);
+    }
     return true;
   }
 
@@ -340,6 +352,7 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
       },
     });
 
+    dropCrew(wsId);
     json(res, { reset: true });
     return true;
   }
@@ -347,8 +360,11 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
   if (path === "/api/planner/status" && method === "GET") {
     const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
     const wsId = url.searchParams.get("workspace")?.trim() || defaultWorkspaceId;
-    // Logs only exist on the run; everything else is read back off the graph.
-    json(res, { ...(getPlannerState(wsId) ?? { status: "idle", logs: [] }), ...plannerStateFromGraph(wsId) });
+    json(res, {
+      logs: crewLogs(wsId),
+      running: crewRunning(wsId),
+      ...(plannerStateFromGraph(wsId) ?? { status: "idle" }),
+    });
     return true;
   }
 
@@ -358,7 +374,7 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
 /**
  * Consensus state as the graph holds it.
  *
- * The LangGraph run state only knows what the *agents* last decided. A human
+ * The in-memory run only knows logs. A human
  * editing a node in the browser breaks consensus by writing to the CRDT, and
  * the run never hears about it — so reading agreement from the run reports a
  * plan as approved while the board shows dirty nodes and two agents mid-review.
@@ -381,6 +397,19 @@ function plannerStateFromGraph(wsId: string): Record<string, unknown> | undefine
     activeAssumptionId: props.pendingAssumptionId ?? undefined,
     activeAgent: props.activeAgent ?? "none",
   };
+}
+
+function plannerChatError(res: ServerResponse, err: unknown): true {
+  if (err instanceof NoModelError) {
+    fail(res, 503, err.message);
+    return true;
+  }
+  if (err instanceof CrewBusyError) {
+    fail(res, 409, err.message);
+    return true;
+  }
+  fail(res, 500, err instanceof Error ? err.message : String(err));
+  return true;
 }
 
 function parseJson(body: Buffer): Record<string, unknown> | undefined {

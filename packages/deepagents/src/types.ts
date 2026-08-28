@@ -106,6 +106,8 @@ export interface SubAgentConfigOptions {
   extraTools?: StructuredToolInterface[];
   excludedTools?: string[];
   systemPromptSuffix?: string;
+  /** Complete override for the system prompt (bypasses schema generation). */
+  systemPromptOverride?: string;
   onToolCall?: (event: ToolCallEvent) => void;
 }
 

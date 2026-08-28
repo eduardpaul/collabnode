@@ -178,6 +178,21 @@ describe("@collabnode/deepagents configuration provider", () => {
     expect(subagent.tools.map((t) => t.name)).toContain("upsert_node_Task");
   });
 
+  it("allows systemPromptOverride on subagents", async () => {
+    const session = await createTestSession();
+    const subagent = createSubAgentConfig({
+      session,
+      workspaceType,
+      role: "worker",
+      language: "en",
+      systemPromptOverride: "You are a test architect.",
+      systemPromptSuffix: "Stay brief.",
+    });
+
+    expect(subagent.systemPrompt).toBe("You are a test architect.\n\nStay brief.");
+    expect(subagent.systemPrompt).not.toContain("You are a Task Worker");
+  });
+
   it("holds a subagent to the same tools policy as the parent agent", async () => {
     const session = await createTestSession();
     const parent = getDeepAgentConfig({ session, workspaceType, role: "manager", language: "en" });
@@ -229,6 +244,7 @@ describe("@collabnode/deepagents configuration provider", () => {
     });
 
     expect(typeof result).toBe("string");
+    expect(result).not.toMatch(/^Tool error:/);
     expect(toolLogs.length).toBe(1);
     expect(toolLogs[0].name).toBe("upsert_node_Goal");
     expect(toolLogs[0].actorId).toBe("ai-manager");

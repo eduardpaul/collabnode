@@ -1,88 +1,96 @@
-# Solution Planner — Collaborative AI Multi-Agent Planner
+# Solution Planner — Collaborative Deep Agents
 
-A minimalist, YAGNI-focused real-time collaborative application demonstrating **collabnode**'s distributed graph capabilities, React hooks (`@collabnode/react`), and **LangGraph 1.x** multi-agent cyclic workflows with human-in-the-loop validation.
+A real-time collaborative planner: a human, an AI Product Manager, and an AI Architect write the same collabnode graph. The Manager is a Deep Agent the user talks to; the Architect is a subagent it delegates to.
 
 ---
 
-## Highlights
+## How it works
 
-- **Real-Time Collaboration**: Powered by `collabnode` CRDT runtime (`CollabSession`) with Fluid Framework relay & Redis/Memory registry.
-- **Multi-Agent Cyclic Workflow (LangChain 1.x / LangGraph 1.x)**:
-  - **AI Manager**: Responsible for business Epics, Features, Business Risks, and raising strategic Assumptions.
-  - **AI Architect**: Reads Manager's scope, then generates C4 as **C4DiagramElement** nodes whose `type` is Person, System, Boundary, Container, or Component (`external: true` renders as Mermaid `_Ext`) and decomposes work into Tasks. Graph context is in the prompt; each turn is one structured-output call (`invokeStructured`), not a Deep Agents tool loop.
-  - **Consensus Loop**: Agents take turns mutating shared state until both agree (`managerAgrees && architectAgrees`).
-- **Dirty nodes + on-demand revision**: Human edits mark nodes `dirty` (an Epic dirties its Features and Tasks). **Revise dirty nodes** re-runs the Manager ↔ Architect loop against that subgraph so they adapt the plan and raise risks, then clear the flags. You can attach an optional **review note** so the crew has extra context for the change.
-- **Human-In-The-Loop (HITL)**: When either agent flags a critical assumption, LangGraph pauses execution (`waiting_user_validation`) and waits for human approval or rejection via the UI before resuming.
-- **Task estimation**: Tasks have no workflow status (they are estimates, not a board). Each task's **description** must include **What** (functional outcome) and **How** (technical approach). Effort is scored as:
-  1. **Functional Points**: Fibonacci story points (`1, 2, 3, 5, 8, 13, 21`) for functional effort.
-  2. **Technical Points**: Fibonacci story points (`1, 2, 3, 5, 8, 13, 21`) for technical effort.
-  3. **Complexity**: 0 (Trivial) to 5 (Massive architectural overhaul).
-  4. **Uncertainty**: 0 (Done 100x) to 5 (Pure R&D).
-  5. **Friction**: 0 (Solo work) to 5 (Heavy cross-team/vendor coordination).
-  6. **NFR Scale**: 0 (Low/Internal) to 3 (Extreme compliance/scale).
-- **Typed against its own schema**: `src/workspace.types.ts` is generated from `workspaces/solution-planner.yaml` by `collabnode types`, and the dev server regenerates it on save (`collabnodeTypes()` from `collabnode/vite`). `PlannerSession` in `src/agent/session.ts` is `CollabSession<SolutionPlanner>`, so a renamed property or a value outside an enum is a compile error rather than a runtime one. See [Typed schemas](../../README.md#typed-schemas-collabnode-types).
-- **First-Class React Integration**: Built with `@collabnode/react` hooks (`useCollab`, `useCollabSnapshot`, `useCollabNodes`, etc.).
-- **Live Graph Canvas**: Embedded `<collab-graph>` from `@collabnode/graph-view`. The sample also has a local `<collab-mermaid>` that turns planner nodes into Mermaid DSL and renders them with mermaid.js — C4 containers each have their own node, and the C4 diagram is assembled from those nodes.
-- **Bilingual (English & Spanish)**: Full UI toggle and automatic language detection for agent responses.
-- **Structured output vs Deep Agents**: Asking a role for specific nodes (requirements → Epics and Features) is `invokeStructured` — one shot, schema-enforced, no tool loop. Graph tools and MCP extras belong on `createWorkspaceDeepAgent` / `getDeepAgentConfig`. Microsoft Learn MCP still loads in tests (`MICROSOFT_LEARN_MCP=0` to disable) so the wiring stays proven; the planner's LLM turns do not call it.
-- **Zero-API-Key Local DX**: Runs seamlessly out of the box with deterministic simulation, or with real LLMs (`OPENAI_API_KEY`, `GEMINI_API_KEY`).
+- **Shared workspace**: Fluid (or memory) CRDT. The board and the agents see the same nodes and edges as they appear.
+- **Talk to the Manager**: one prompt box. The Manager reads `view_solution_view` (requirements on `SolutionState` plus the current plan), writes Epics / Features / business risks / assumptions, and **delegates** C4, Tasks, and technical risks to the `architect` subagent.
+- **Live writes**: graph tools mutate the `CollabSession` immediately. You watch cards and mermaid update while the HTTP call is still open.
+- **Dirty edits**: change a node on the board and it marks `dirty` (and descendants). **Adapt my edits** asks the Manager to call `view_dirty_review` and fix only that subgraph.
+- **HITL**: a pending Assumption pauses the crew (`waiting_user_validation`). Approve or reject on the banner; that is another message on the same Manager thread.
+- **Typed schema**: `src/workspace.types.ts` is generated from `workspaces/solution-planner.yaml`. Saving the YAML in `dev` regenerates it.
+
+There is no LangGraph consensus cycle and no structured-output plan batch. Tools are the schema; the Deep Agent loop is the planner.
 
 ---
 
 ## Getting Started
 
-### 1. Start the Planner
-
 ```bash
 pnpm --filter @collabnode/example-solution-planner dev
 ```
 
-Open [http://127.0.0.1:4180](http://127.0.0.1:4180) in your browser.
+Open [http://127.0.0.1:4180](http://127.0.0.1:4180).
 
-### 2. Run Tests
+### Tests
 
 ```bash
 pnpm --filter @collabnode/example-solution-planner test
 ```
 
-That runs the planner consensus tests, a functional usability journey (edit a dirty Epic, attach a review note, assert the Manager ↔ Architect loop uses it), and Microsoft Learn MCP client wiring.
-
-Live Foundry (requires `.env` credentials):
+Live LLM (requires `.env` credentials):
 
 ```bash
 pnpm --filter @collabnode/example-solution-planner test:llm
 ```
 
-That fails if the LLM is missing or the Manager/Architect cannot produce a schema-checked plan. Learn MCP is still required to load (`MICROSOFT_LEARN_MCP=1`) as a connectivity check; it is not invoked during the structured-output turns.
+### Optimize agent prompts (GEPA)
 
-### 3. Change the schema
-
-Edit `workspaces/solution-planner.yaml` and save. `src/workspace.types.ts` is
-rewritten by the dev server, and anything that no longer matches goes red in the
-editor — nothing to run. Outside a dev server:
+GEPA evaluates the live Manager + Architect crew on a locked Azure brief, scores the graph with a deterministic rubric, reflects on the traces, and mutates `systemPrompt.en` for both roles. Every rollout uses the same Azure deployment as the app (`getChatModel()`). Reflection defaults to that same model.
 
 ```bash
-pnpm --filter @collabnode/example-solution-planner gen:types    # regenerate
-pnpm --filter @collabnode/example-solution-planner check:types  # CI: fail if stale
+pip install gepa
+pnpm --filter @collabnode/example-solution-planner opt:prompts
+pnpm --filter @collabnode/example-solution-planner opt:prompts -- --apply-winner
+pnpm --filter @collabnode/example-solution-planner opt:prompts -- --max-metric-calls 8
 ```
 
-The generated file is checked in. Do not edit it by hand.
+`--apply-winner` writes the winner into `workspaces/solution-planner.yaml` (English prompts only). Artifacts land in `prompt-trials/<timestamp>/` (`compare.md`, `best_candidate.json`, per-trial JSON). Default `max_metric_calls` is 4 (baseline plus a few mutations) so a run stays on the order of minutes.
+
+Do not run this unattended on a production key: each trial is a full crew turn (~3 min wall, real tokens).
+
+### Change the schema
+
+Edit `workspaces/solution-planner.yaml` and save. Types regenerate in `dev`.
+
+```bash
+pnpm --filter @collabnode/example-solution-planner gen:types
+pnpm --filter @collabnode/example-solution-planner check:types
+```
 
 ---
 
-## Environment Variables (Optional)
+## Environment
 
 ```bash
-# LLM Providers (optional - deterministic simulator runs if omitted)
-OPENAI_API_KEY="sk-..."
-GEMINI_API_KEY="..."
+# LLM (required for the Manager). First match wins unless LLM_PROVIDER is set.
+AZURE_OPENAI_API_KEY="..."
+AZURE_OPENAI_ENDPOINT="https://....openai.azure.com"
+AZURE_OPENAI_DEPLOYMENT_NAME="gpt-4o"
+# or OPENAI_API_KEY / GEMINI_API_KEY
+LLM_PROVIDER=azure   # optional: azure | openai | gemini
 
-# Collab & Registry backends
-COLLAB_BACKEND="fluid" # "fluid" (default) or "hocuspocus"
-REDIS_URL="redis://127.0.0.1:6379" # optional Redis registry
+# Microsoft Learn MCP for the Architect (optional; disable with 0)
+MICROSOFT_LEARN_MCP=1
+MICROSOFT_LEARN_MCP_URL="https://learn.microsoft.com/api/mcp"
+
+COLLAB_BACKEND=fluid   # fluid | memory | hocuspocus
+REDIS_URL=             # optional registry
 PORT=4180
-
-# Microsoft Learn MCP (Architect). Public, no auth. Set to 0 to disable.
-# MICROSOFT_LEARN_MCP=0
-# MICROSOFT_LEARN_MCP_URL="https://learn.microsoft.com/api/mcp"
 ```
+
+Without an API key the board still opens; sending a prompt returns 503 instead of inventing a plan.
+
+---
+
+## Roles (from the YAML)
+
+| | Manager | Architect |
+|---|---|---|
+| Who starts it | You, via **Talk to the Manager** | The Manager, via Deep Agents `task` |
+| Writes | Epic, Feature, business Risk, Assumption | C4DiagramElement, Task, technical Risk, Assumption |
+| Read-only | C4, Task | Epic, Feature |
+| Compliance | `view_solution_view` → `managerAgrees` | `view_solution_view` → `architectAgrees` |

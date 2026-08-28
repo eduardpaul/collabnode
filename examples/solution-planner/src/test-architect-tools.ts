@@ -1,13 +1,12 @@
 import { AzureChatOpenAI } from "@langchain/openai";
-import { z } from "zod";
 import {
   parseMcpSseOrJson,
   stringifyMcpToolResult,
   StreamableHttpMcpClient,
   unwrapJsonRpc,
 } from "./agent/mcp-http.ts";
-import { loadMicrosoftLearnTools, microsoftLearnMcpUrl } from "./agent/microsoft-learn.ts";
-import { invokeStructured, toBindableTools } from "@collabnode/deepagents";
+import { loadMicrosoftLearnTools, microsoftLearnMcpUrl } from "./agent/learn.ts";
+import { toBindableTools } from "@collabnode/deepagents";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -210,46 +209,6 @@ async function testLearnToolWrapper() {
   console.log("✓ Learn MCP tools wrap");
 }
 
-async function testInvokeStructuredIsSingleShot() {
-  console.log("▶ invokeStructured is one shot — no bindTools");
-
-  const planSchema = z.object({
-    title: z.string(),
-    grounded: z.boolean(),
-  });
-
-  let bound = false;
-  let schemaSent: unknown;
-  const model = {
-    bindTools() {
-      bound = true;
-      return { invoke: async () => ({}) };
-    },
-    withStructuredOutput(schema: unknown) {
-      schemaSent = schema;
-      return {
-        invoke: async () => ({ title: "C4 Container Diagram", grounded: true }),
-      };
-    },
-  };
-
-  const parsed = await invokeStructured(
-    model as never,
-    planSchema,
-    "Design auth for a Container Apps API.",
-    "architect_plan",
-    { system: "You are the architect." },
-  );
-
-  assert(!bound, "invokeStructured must not bind tools");
-  assert(
-    schemaSent !== undefined && typeof schemaSent === "object" && !("_zod" in (schemaSent as object)),
-    "provider must receive JSON Schema, not Zod internals",
-  );
-  assert(parsed.title === "C4 Container Diagram" && parsed.grounded === true, "structured plan mismatch");
-  console.log("✓ Structured output is a single shot");
-}
-
 async function testLearnUrlBudget() {
   const previous = process.env.MICROSOFT_LEARN_MCP_URL;
   delete process.env.MICROSOFT_LEARN_MCP_URL;
@@ -260,13 +219,12 @@ async function testLearnUrlBudget() {
 }
 
 async function run() {
-  console.log("▶ Testing Learn MCP wiring + single-shot structured output...");
+  console.log("▶ Testing Learn MCP wiring...");
   await testSseParser();
   await testMcpHttpClient();
   await testLearnToolWrapper();
-  await testInvokeStructuredIsSingleShot();
   await testLearnUrlBudget();
-  console.log("🎉 Architect MCP + structured-output tests passed");
+  console.log("🎉 Architect MCP tests passed");
 }
 
 run().catch((err) => {

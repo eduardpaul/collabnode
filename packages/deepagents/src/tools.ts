@@ -106,8 +106,11 @@ export function bindAgentTools(options: BindAgentToolsOptions): StructuredToolIn
           });
         }
 
+        // Return the error as tool output so a Deep Agent can recover.
+        // Throwing here aborts the LangGraph superstep (AggregateError) instead
+        // of letting the model see a failed edge/node write and retry.
         if (res.isError) {
-          throw new Error(resultText);
+          return `Tool error: ${resultText}`;
         }
 
         return resultText;

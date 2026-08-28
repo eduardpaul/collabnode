@@ -9,7 +9,7 @@ import {
   formatTaskDescription,
   nextPoints,
   parsePoints,
-} from "./agent/schemas.ts";
+} from "./agent/task-edit.ts";
 
 interface AgentLog {
   actor: "manager" | "architect" | "user" | "system";
@@ -23,6 +23,7 @@ interface PlannerStatusResponse {
   architectAgrees: boolean;
   iteration: number;
   activeAssumptionId?: string;
+  running?: boolean;
   logs: AgentLog[];
 }
 
@@ -50,6 +51,8 @@ export function App() {
   const [description, setDescription] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [agentLogs, setAgentLogs] = useState<AgentLog[]>([]);
+  const [crewRunning, setCrewRunning] = useState(false);
+  const logBoxRef = useRef<HTMLDivElement | null>(null);
   const [validationComment, setValidationComment] = useState("");
   const [reviseMessage, setReviseMessage] = useState("");
   const [editingC4Id, setEditingC4Id] = useState<string | null>(null);
@@ -166,26 +169,34 @@ export function App() {
         ) ?? assumptions.find((a) => a.properties.status === "pending"))
       : undefined;
 
-  // Poll agent state and logs for the active workspace
+  // Poll crew logs while the HTTP invoke is still open — graph tools and
+  // stream events land in memory as they happen.
   useEffect(() => {
+    let cancelled = false;
     const fetchStatus = async () => {
       try {
         const res = await fetch(`/api/planner/status?workspace=${encodeURIComponent(currentWorkspaceId)}`);
         const data: PlannerStatusResponse = await res.json();
-        if (data.logs && data.logs.length > 0) {
-          setAgentLogs(data.logs);
-        } else {
-          setAgentLogs([]);
-        }
+        if (cancelled) return;
+        setAgentLogs(Array.isArray(data.logs) ? data.logs : []);
+        setCrewRunning(data.running === true);
       } catch {
         // ignore
       }
     };
 
     fetchStatus();
-    const timer = setInterval(fetchStatus, 1500);
-    return () => clearInterval(timer);
-  }, [currentWorkspaceId]);
+    const timer = setInterval(fetchStatus, isSubmitting || crewRunning ? 400 : 1500);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [currentWorkspaceId, crewRunning, isSubmitting]);
+
+  useEffect(() => {
+    const box = logBoxRef.current;
+    if (box) box.scrollTop = box.scrollHeight;
+  }, [agentLogs]);
 
   const isEs = lang === "es";
 
@@ -235,24 +246,30 @@ export function App() {
     }
   };
 
-  // --- Agent & Workflow Execution Handlers ---
-  const handleStartPlanning = async (customPrompt?: string) => {
+  const handleChat = async (customPrompt?: string) => {
     const textToUse = customPrompt || description;
     if (!textToUse.trim()) return;
     setIsSubmitting(true);
 
     try {
-      await fetch("/api/planner/start", {
+      const res = await fetch("/api/planner/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           workspaceId: currentWorkspaceId,
-          description: textToUse,
+          message: textToUse,
           language: lang,
         }),
       });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: res.statusText }));
+        console.error("Chat error:", body.error ?? res.statusText);
+      } else {
+        setDescription("");
+        setReviseMessage("");
+      }
     } catch (err) {
-      console.error("Start planning error:", err);
+      console.error("Chat error:", err);
     } finally {
       setIsSubmitting(false);
     }
@@ -268,44 +285,13 @@ export function App() {
     await markParentDirtyOnDelete(session, nodeId);
   };
 
-  const handleReviseDirty = async () => {
+  const handleAdaptDirty = async () => {
     if (!canReviseDirty) return;
-    setIsSubmitting(true);
-    try {
-      const res = await fetch("/api/planner/revise", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          workspaceId: currentWorkspaceId,
-          reviewMessage: reviseMessage.trim() || undefined,
-        }),
-      });
-      if (res.ok) {
-        setReviseMessage("");
-      }
-    } catch (err) {
-      console.error("Revise dirty error:", err);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleTriggerAgent = async (actor: "manager" | "architect") => {
-    setIsSubmitting(true);
-    try {
-      await fetch("/api/planner/step", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          workspaceId: currentWorkspaceId,
-          actor,
-        }),
-      });
-    } catch (err) {
-      console.error("Trigger agent error:", err);
-    } finally {
-      setIsSubmitting(false);
-    }
+    const note = reviseMessage.trim();
+    const prompt = isEs
+      ? `El usuario editó el grafo. Llama view_dirty_review y adapta solo esos nodos y sus relaciones.${note ? ` Nota: ${note}` : ""} Delega C4, tareas y riesgos técnicos al arquitecto.`
+      : `The human edited the graph. Call view_dirty_review and adapt only those nodes and their relationships.${note ? ` Note: ${note}` : ""} Delegate C4, tasks, and technical risks to the architect.`;
+    await handleChat(prompt);
   };
 
   const handleValidation = async (assumptionId: string, approved: boolean, comment?: string) => {
@@ -938,57 +924,26 @@ export function App() {
             className="prompt-input"
             placeholder={
               isEs
-                ? "Describe la aplicación que deseas planificar en este espacio..."
-                : "Describe the application you want to plan in this workspace..."
+                ? "Habla con el Gestor: requisitos, un cambio, o una pregunta sobre el plan..."
+                : "Talk to the Manager: requirements, a change, or a question about the plan..."
             }
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleStartPlanning()}
+            onKeyDown={(e) => e.key === "Enter" && void handleChat()}
           />
           <button
             type="button"
             className="btn-primary"
             disabled={isSubmitting || !description.trim()}
-            onClick={() => handleStartPlanning()}
+            onClick={() => void handleChat()}
           >
             {isSubmitting
               ? isEs
-                ? "Planificando..."
-                : "Planning..."
+                ? "El gestor está trabajando…"
+                : "Manager is working…"
               : isEs
-              ? "🚀 Co-Diseñar Solución"
-              : "🚀 Start Co-Design"}
-          </button>
-        </div>
-
-        {/* Manual Agent Trigger Buttons */}
-        <div
-          style={{
-            display: "flex",
-            gap: "10px",
-            flexWrap: "wrap",
-            alignItems: "center",
-            paddingTop: "6px",
-          }}
-        >
-          <span style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: 600 }}>
-            {isEs ? "Disparar Agente Directamente:" : "Invoke Agents Directly:"}
-          </span>
-          <button
-            type="button"
-            className="btn-action"
-            disabled={isSubmitting}
-            onClick={() => handleTriggerAgent("manager")}
-          >
-            👔 {isEs ? "Ejecutar Gestor IA (Epics & Negocio)" : "Run AI Manager (Epics & Scope)"}
-          </button>
-          <button
-            type="button"
-            className="btn-action"
-            disabled={isSubmitting}
-            onClick={() => handleTriggerAgent("architect")}
-          >
-            📐 {isEs ? "Ejecutar Arquitecto IA (C4 & Tareas)" : "Run AI Architect (C4 & Tasks)"}
+              ? "💬 Hablar con el Gestor"
+              : "💬 Talk to the Manager"}
           </button>
         </div>
 
@@ -999,12 +954,12 @@ export function App() {
             data-testid="revise-message"
             placeholder={
               isEs
-                ? "Nota para el equipo (opcional): qué deben considerar al revisar los nodos sucios..."
-                : "Note for the crew (optional): what they should consider when revising dirty nodes..."
+                ? "Nota para adaptar tus ediciones (opcional)…"
+                : "Note for adapting your edits (optional)…"
             }
             value={reviseMessage}
             onChange={(e) => setReviseMessage(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && void handleReviseDirty()}
+            onKeyDown={(e) => e.key === "Enter" && void handleAdaptDirty()}
             disabled={isSubmitting || dirtyCount === 0}
           />
           <button
@@ -1012,21 +967,21 @@ export function App() {
             className="btn-action"
             data-testid="revise-dirty"
             disabled={isSubmitting || !canReviseDirty}
-            onClick={() => void handleReviseDirty()}
+            onClick={() => void handleAdaptDirty()}
             title={
               dirtyCount === 0
                 ? isEs
                   ? "No hay nodos sucios"
                   : "No dirty nodes"
                 : isEs
-                  ? "Revisar nodos sucios con Gestor ↔ Arquitecto"
-                  : "Revise dirty nodes with Manager ↔ Architect"
+                  ? "Pedir al gestor que adapte los nodos sucios"
+                  : "Ask the manager to adapt dirty nodes"
             }
           >
             ♻️{" "}
             {isEs
-              ? `Revisar nodos sucios${dirtyCount > 0 ? ` (${dirtyCount})` : ""}`
-              : `Revise dirty nodes${dirtyCount > 0 ? ` (${dirtyCount})` : ""}`}
+              ? `Adaptar ediciones${dirtyCount > 0 ? ` (${dirtyCount})` : ""}`
+              : `Adapt my edits${dirtyCount > 0 ? ` (${dirtyCount})` : ""}`}
           </button>
         </div>
 
@@ -1039,7 +994,7 @@ export function App() {
               className="suggestion-chip"
               onClick={() => {
                 setDescription(s);
-                void handleStartPlanning(s);
+                void handleChat(s);
               }}
             >
               {s}
@@ -1652,14 +1607,22 @@ export function App() {
             <h3 style={{ fontSize: "14px", fontWeight: 700 }}>
               📜 {isEs ? "Registro de Actividad de Agentes" : "Agent Activity Log"}
             </h3>
-            <div className="log-box">
+            <div className="log-box" ref={logBoxRef}>
               {agentLogs.map((log, i) => (
                 <div key={i} className="log-entry">
                   <span className={`log-actor ${log.actor}`}>[{log.actor.toUpperCase()}]</span>
                   <span className="log-text">{log.text}</span>
                 </div>
               ))}
-              {agentLogs.length === 0 && (
+              {crewRunning && (
+                <div className="log-entry">
+                  <span className="log-actor system">[LIVE]</span>
+                  <span className="log-text">
+                    {isEs ? "Agente trabajando…" : "Agent working…"}
+                  </span>
+                </div>
+              )}
+              {agentLogs.length === 0 && !crewRunning && (
                 <div style={{ color: "var(--text-muted)" }}>
                   {isEs ? "No hay registros aún en este espacio." : "No logs recorded yet in this workspace."}
                 </div>
