@@ -183,7 +183,10 @@ export function formatSystemPromptText(
     "",
     t.prompts.rulesHeader,
     t.prompts.rules.multiParticipant,
-    t.prompts.rules.preferTargetedReads,
+    // Only worth saying where graph_snapshot exists to be preferred against.
+    ctx.type?.tools?.advanced?.includes("graph_snapshot")
+      ? t.prompts.rules.preferTargetedReads
+      : undefined,
     t.prompts.rules.searchBeforeCreate,
     t.prompts.rules.identityMatching,
     schema.config.tags?.enabled ? t.prompts.rules.tagsSupported : undefined,

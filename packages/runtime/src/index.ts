@@ -80,7 +80,27 @@ export {
 export type { GraphSearchModes } from "@collabnode/graph";
 export { walk, type WalkDirection, type WalkHop, type WalkOptions, type WalkResult } from "@collabnode/graph";
 export {
+  edgesOfType,
+  findOfType,
+  nodeOfType,
+  nodesOfType,
+  nodesOfTypes,
+  ofType,
+  singletonOfType,
+  type EdgeOf,
+  type NodeOf,
+  type Typed,
+} from "@collabnode/graph";
+export {
   snapshotToMarkdown,
   diffSnapshotsToMarkdown,
   type SnapshotMarkdownOptions,
 } from "./snapshot-format.js";
+export {
+  resolveView,
+  renderView,
+  renderViewMarkdown,
+  type RenderViewOptions,
+  type ResolvedView,
+  type ResolveViewOptions,
+} from "./views.js";

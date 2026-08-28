@@ -7,9 +7,17 @@ import {
   type GraphStore,
   type WorkspaceScope,
 } from "@collabnode/graph";
-import { lwwProperties, type GraphSchema } from "@collabnode/schema";
+import {
+  lwwProperties,
+  type AnyGraph,
+  type GraphSchema,
+  type GraphTypeMap,
+} from "@collabnode/schema";
 
-export type ProjectorListener = (ops: GraphOp[], snapshot: GraphSnapshot) => void;
+export type ProjectorListener<S extends GraphTypeMap = AnyGraph> = (
+  ops: GraphOp[],
+  snapshot: GraphSnapshot<S>,
+) => void;
 
 /** Debounce CRDT-only sink writes so the graph store is not updated per keystroke. */
 export const CRDT_PROJECT_DEBOUNCE_MS = 250;

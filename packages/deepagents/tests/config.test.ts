@@ -169,6 +169,33 @@ describe("@collabnode/deepagents configuration provider", () => {
     expect(subagent.tools.map((t) => t.name)).toContain("upsert_node_Task");
   });
 
+  it("holds a subagent to the same tools policy as the parent agent", async () => {
+    const session = await createTestSession();
+    const parent = getDeepAgentConfig({ session, workspaceType, role: "manager", language: "en" });
+    const subagent = createSubAgentConfig({ session, workspaceType, role: "manager", language: "en" });
+
+    const parentTools = new Set(parent.tools.map((t) => t.name));
+    const extra = subagent.tools.map((t) => t.name).filter((name) => !parentTools.has(name));
+
+    // Dropping `toolsPolicy` here used to hand the subagent the unfiltered
+    // surface: every `tools.expose` entry plus writes to `nodes.readOnly` types.
+    expect(extra).toEqual([]);
+    expect(subagent.tools.map((t) => t.name)).not.toContain("upsert_node_Task");
+    expect(subagent.tools.map((t) => t.name)).not.toContain("upsert_edge_HAS_TASK");
+  });
+
+  it("marks each graph tool read-only or not, from the schema's own annotation", async () => {
+    const session = await createTestSession();
+    const config = getDeepAgentConfig({ session, workspaceType, role: "manager" });
+    const readOnlyOf = (name: string) =>
+      (config.tools.find((t) => t.name === name)?.metadata as { readOnly?: boolean } | undefined)
+        ?.readOnly;
+
+    expect(readOnlyOf("graph_get")).toBe(true);
+    expect(readOnlyOf("graph_list")).toBe(true);
+    expect(readOnlyOf("upsert_node_Goal")).toBe(false);
+  });
+
   it("executes tool calls in real time against the CollabSession stamped with actorId", async () => {
     const session = await createTestSession();
     const toolLogs: any[] = [];

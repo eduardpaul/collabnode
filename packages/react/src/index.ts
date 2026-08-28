@@ -11,29 +11,44 @@ import {
   type ReactNode,
 } from "react";
 import { connect, type ConnectOptions, type WebCollab } from "@collabnode/web";
+import { resolveView } from "@collabnode/runtime";
 import type {
   ApplyOpsResult,
   BatchBuilder,
   CollabSession,
   GraphOpInput,
   MutationOptions,
+  ResolvedView,
   UpsertEdgeInput,
   UpsertNodeInput,
 } from "@collabnode/runtime";
 import type { GraphEdgeRecord, GraphNodeRecord, GraphSnapshot } from "@collabnode/graph";
 import type { Peer } from "@collabnode/collab";
+import type {
+  AnyGraph,
+  EdgeNameOf,
+  GraphTypeMap,
+  NodeNameOf,
+  ViewDef,
+} from "@collabnode/schema";
 
-export interface UseCollabResult {
-  session: CollabSession | null;
-  snapshot: GraphSnapshot | null;
+/**
+ * Every hook here takes a workspace's type map as its first type argument, and
+ * defaults to `AnyGraph` — the untyped shapes these hooks have always had. Pass
+ * the `GraphTypes<…>` a generated module exports and the snapshot, the writes
+ * and `nodesByType` all narrow to that schema.
+ */
+export interface UseCollabResult<S extends GraphTypeMap = AnyGraph> {
+  session: CollabSession<S> | null;
+  snapshot: GraphSnapshot<S> | null;
   isLoading: boolean;
   isConnected: boolean;
   error: Error | null;
   /** Nodes grouped by `type`, so a view does not filter the snapshot itself. */
-  nodesByType: Record<string, GraphNodeRecord[]>;
-  upsertNode: (input: UpsertNodeInput, options?: MutationOptions) => Promise<string>;
+  nodesByType: { [T in NodeNameOf<S>]?: GraphNodeRecord<S, T>[] };
+  upsertNode: (input: UpsertNodeInput<S>, options?: MutationOptions) => Promise<string>;
   deleteNode: (id: string, options?: MutationOptions) => Promise<void>;
-  upsertEdge: (input: UpsertEdgeInput, options?: MutationOptions) => Promise<string>;
+  upsertEdge: (input: UpsertEdgeInput<S>, options?: MutationOptions) => Promise<string>;
   deleteEdge: (id: string, options?: MutationOptions) => Promise<void>;
 }
 
@@ -99,8 +114,10 @@ function getSessionStore(session: CollabSession): SessionStore {
  * dropped keeps its container, its socket and its presence registration for as
  * long as the tab lives, and StrictMode opens two of them per mount.
  */
-export function useCollab(options?: ConnectOptions | null): UseCollabResult {
-  const [session, setSession] = useState<CollabSession | null>(null);
+export function useCollab<S extends GraphTypeMap = AnyGraph>(
+  options?: ConnectOptions | null,
+): UseCollabResult<S> {
+  const [session, setSession] = useState<CollabSession<S> | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(Boolean(options));
   const [error, setError] = useState<Error | null>(null);
 
@@ -141,7 +158,7 @@ export function useCollab(options?: ConnectOptions | null): UseCollabResult {
           void collab.close();
           return;
         }
-        setSession(collab.session);
+        setSession(collab.session as unknown as CollabSession<S>);
         setIsLoading(false);
       })
       .catch((err: unknown) => {
@@ -160,10 +177,13 @@ export function useCollab(options?: ConnectOptions | null): UseCollabResult {
   }, [documentId, actorId, schemaKey, collabKey]);
 
   const snapshot = useCollabSnapshot(session);
-  const nodesByType = useMemo(() => groupByType(snapshot.nodes), [snapshot]);
+  const nodesByType = useMemo(
+    () => groupByType(snapshot.nodes) as UseCollabResult<S>["nodesByType"],
+    [snapshot],
+  );
 
   const upsertNode = useCallback(
-    async (input: UpsertNodeInput, mutationOpts?: MutationOptions) => {
+    async (input: UpsertNodeInput<S>, mutationOpts?: MutationOptions) => {
       if (!session) throw new Error("No active collab session");
       return session.upsertNode(input, mutationOpts);
     },
@@ -179,7 +199,7 @@ export function useCollab(options?: ConnectOptions | null): UseCollabResult {
   );
 
   const upsertEdge = useCallback(
-    async (input: UpsertEdgeInput, mutationOpts?: MutationOptions) => {
+    async (input: UpsertEdgeInput<S>, mutationOpts?: MutationOptions) => {
       if (!session) throw new Error("No active collab session");
       return session.upsertEdge(input, mutationOpts);
     },
@@ -211,8 +231,10 @@ export function useCollab(options?: ConnectOptions | null): UseCollabResult {
 /**
  * Subscribe to realtime graph changes on a CollabSession using useSyncExternalStore with cached snapshots.
  */
-export function useCollabSnapshot(session: CollabSession | null | undefined): GraphSnapshot {
-  const store = session ? getSessionStore(session) : null;
+export function useCollabSnapshot<S extends GraphTypeMap = AnyGraph>(
+  session: CollabSession<S> | null | undefined,
+): GraphSnapshot<S> {
+  const store = session ? getSessionStore(session as unknown as CollabSession) : null;
 
   const subscribe = useCallback(
     (onStoreChange: () => void) => {
@@ -227,48 +249,87 @@ export function useCollabSnapshot(session: CollabSession | null | undefined): Gr
     return store.snapshot;
   }, [store]);
 
-  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot) as unknown as GraphSnapshot<S>;
 }
 
 /**
  * Select nodes from the active graph session, optionally filtered by type.
  */
-export function useCollabNodes<T extends GraphNodeRecord = GraphNodeRecord>(
-  session: CollabSession | null | undefined,
-  type?: string,
-): T[] {
+export function useCollabNodes<
+  S extends GraphTypeMap = AnyGraph,
+  T extends NodeNameOf<S> = NodeNameOf<S>,
+>(session: CollabSession<S> | null | undefined, type?: T): GraphNodeRecord<S, T>[] {
   const snapshot = useCollabSnapshot(session);
   return useMemo(() => {
-    if (!type) return snapshot.nodes as T[];
-    return snapshot.nodes.filter((node) => node.type === type) as T[];
+    if (!type) return snapshot.nodes as GraphNodeRecord<S, T>[];
+    return snapshot.nodes.filter((node) => node.type === type) as GraphNodeRecord<S, T>[];
   }, [snapshot, type]);
 }
 
 /**
  * Select a single node from the active graph session by its ID.
  */
-export function useCollabNode<T extends GraphNodeRecord = GraphNodeRecord>(
-  session: CollabSession | null | undefined,
+export function useCollabNode<S extends GraphTypeMap = AnyGraph>(
+  session: CollabSession<S> | null | undefined,
   id: string | null | undefined,
-): T | undefined {
+): GraphNodeRecord<S> | undefined {
   const snapshot = useCollabSnapshot(session);
   return useMemo(() => {
     if (!id) return undefined;
-    return snapshot.nodes.find((node) => node.id === id) as T | undefined;
+    return snapshot.nodes.find((node) => node.id === id);
   }, [snapshot, id]);
+}
+
+/**
+ * Resolve one named view against the live graph.
+ *
+ * This is the browser half of the `views:` DSL block: the same declaration that
+ * generates an agent's `view_<name>` tool decides what a panel shows, so the two
+ * cannot drift. `view` is the definition itself — take it from
+ * `useCollabJoin().join?.views` — and `params` are the view's own parameters.
+ *
+ * Recomputes when the snapshot changes, like the other selectors here. Pass a
+ * stable `params` object (or memoize it) to avoid re-resolving every render.
+ */
+export function useCollabView(
+  session: CollabSession | null | undefined,
+  view: ViewDef | null | undefined,
+  params?: Record<string, unknown>,
+  options?: { name?: string; language?: string },
+): ResolvedView | null {
+  const snapshot = useCollabSnapshot(session);
+  const schema = session?.schema;
+  const name = options?.name;
+  const language = options?.language;
+  // Params are compared by value: a caller writing `{ epic }` inline should not
+  // force a fresh resolve on every render just for having built a new object.
+  const paramsKey = JSON.stringify(params ?? {});
+  return useMemo(() => {
+    if (!view) {
+      return null;
+    }
+    try {
+      return resolveView(snapshot, view, JSON.parse(paramsKey), { name, language, schema });
+    } catch {
+      // A view whose required parameter is missing is a normal intermediate
+      // state in a UI — the user has not picked an epic yet — not an error the
+      // whole panel should crash on.
+      return null;
+    }
+  }, [snapshot, view, paramsKey, name, language, schema]);
 }
 
 /**
  * Select edges from the active graph session, optionally filtered by type.
  */
-export function useCollabEdges(
-  session: CollabSession | null | undefined,
-  type?: string,
-): GraphEdgeRecord[] {
+export function useCollabEdges<
+  S extends GraphTypeMap = AnyGraph,
+  T extends EdgeNameOf<S> = EdgeNameOf<S>,
+>(session: CollabSession<S> | null | undefined, type?: T): GraphEdgeRecord<S, T>[] {
   const snapshot = useCollabSnapshot(session);
   return useMemo(() => {
-    if (!type) return snapshot.edges;
-    return snapshot.edges.filter((edge) => edge.type === type);
+    if (!type) return snapshot.edges as GraphEdgeRecord<S, T>[];
+    return snapshot.edges.filter((edge) => edge.type === type) as GraphEdgeRecord<S, T>[];
   }, [snapshot, type]);
 }
 
@@ -304,7 +365,8 @@ export function useCollabPresence(session: CollabSession | null | undefined): Pe
   return peers;
 }
 
-export interface CollabContextValue extends UseCollabResult {}
+export interface CollabContextValue<S extends GraphTypeMap = AnyGraph>
+  extends UseCollabResult<S> {}
 
 const CollabContext = createContext<CollabContextValue | null>(null);
 
@@ -329,10 +391,12 @@ export function useCollabContext(): CollabContextValue {
 /**
  * Hook to execute batch mutations on a CollabSession.
  */
-export function useCollabBatch(session: CollabSession | null | undefined) {
+export function useCollabBatch<S extends GraphTypeMap = AnyGraph>(
+  session: CollabSession<S> | null | undefined,
+) {
   const batch = useCallback(
     async (
-      fn: (b: BatchBuilder) => void | Promise<void>,
+      fn: (b: BatchBuilder<S>) => void | Promise<void>,
       options?: MutationOptions,
     ): Promise<ApplyOpsResult> => {
       if (!session) throw new Error("No active collab session");
@@ -342,7 +406,7 @@ export function useCollabBatch(session: CollabSession | null | undefined) {
   );
 
   const applyOps = useCallback(
-    async (ops: GraphOpInput[], options?: MutationOptions): Promise<ApplyOpsResult> => {
+    async (ops: GraphOpInput<S>[], options?: MutationOptions): Promise<ApplyOpsResult> => {
       if (!session) throw new Error("No active collab session");
       return session.applyOps(ops, options);
     },
@@ -355,8 +419,8 @@ export function useCollabBatch(session: CollabSession | null | undefined) {
 /**
  * Reactive hook to get and set an individual property on a node live over CRDT.
  */
-export function useCollabNodeState<V = unknown>(
-  session: CollabSession | null | undefined,
+export function useCollabNodeState<V = unknown, S extends GraphTypeMap = AnyGraph>(
+  session: CollabSession<S> | null | undefined,
   nodeId: string | null | undefined,
   propertyKey: string,
   options?: MutationOptions,
@@ -375,7 +439,8 @@ export function useCollabNodeState<V = unknown>(
         // resending the rest of the bag from a snapshot adds nothing — and puts
         // this replica's view of every other field back on the wire.
         await session.upsertNode(
-          { id: nodeId, type: node.type, properties: { [propertyKey]: newValue } },
+          { id: nodeId, type: node.type, properties: { [propertyKey]: newValue } } as
+            UpsertNodeInput<S>,
           options,
         );
       } finally {
@@ -406,8 +471,18 @@ function collabIdentity(collab: ConnectOptions["collab"] | undefined): string | 
     .join("|");
 }
 
-function groupByType(nodes: readonly GraphNodeRecord[]): Record<string, GraphNodeRecord[]> {
-  const grouped: Record<string, GraphNodeRecord[]> = {};
+/**
+ * Buckets nodes by `type`.
+ *
+ * Deliberately structural rather than typed against a schema: the callers that
+ * need the narrow result cast once, and asking this to be generic would mean
+ * correlating each bucket's key with its element type, which TypeScript cannot
+ * do while the key is still a variable.
+ */
+function groupByType(
+  nodes: readonly { type: string }[],
+): Record<string, { type: string }[]> {
+  const grouped: Record<string, { type: string }[]> = {};
   for (const node of nodes) {
     const bucket = grouped[node.type] ?? [];
     bucket.push(node);
@@ -416,7 +491,8 @@ function groupByType(nodes: readonly GraphNodeRecord[]): Record<string, GraphNod
   return grouped;
 }
 
-export interface UseCollabJoinResult extends UseCollabResult {
+export interface UseCollabJoinResult<S extends GraphTypeMap = AnyGraph>
+  extends UseCollabResult<S> {
   /** What the join endpoint answered, once it has answered. */
   join: JoinResponse | null;
 }
@@ -426,6 +502,11 @@ export interface JoinResponse {
   documentId: string;
   schema: ConnectOptions["schema"];
   collab: ConnectOptions["collab"];
+  /**
+   * The workspace type's named graph slices, so the browser renders the same
+   * views the agents reason about instead of re-deriving its own selections.
+   */
+  views?: Record<string, ViewDef>;
   [key: string]: unknown;
 }
 
@@ -445,10 +526,10 @@ export interface UseCollabJoinOptions {
  * `url` is your join route — the one that answers
  * `{ documentId, schema, collab }`.
  */
-export function useCollabJoin(
+export function useCollabJoin<S extends GraphTypeMap = AnyGraph>(
   url: string | null | undefined,
   options: UseCollabJoinOptions = {},
-): UseCollabJoinResult {
+): UseCollabJoinResult<S> {
   const [join, setJoin] = useState<JoinResponse | null>(null);
   const [joinError, setJoinError] = useState<Error | null>(null);
   const { actorId, graph } = options;
@@ -497,7 +578,7 @@ export function useCollabJoin(
     };
   }, [join, actorId, graph]);
 
-  const collab = useCollab(connectOptions);
+  const collab = useCollab<S>(connectOptions);
   return {
     ...collab,
     join,

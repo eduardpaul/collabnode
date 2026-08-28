@@ -1,9 +1,9 @@
 import type { CollabGraph } from "@collabnode/graph-view";
+import type { CollabMermaid } from "./mermaid/element.ts";
 
 /**
- * `<collab-graph>` is a custom element, so JSX has to be told it exists — and
- * told that its `ref` is the element itself, which is what the app assigns a
- * live `session` to.
+ * Graph web components: JSX has to be told they exist — and that `ref` is the
+ * element itself, which is what the app assigns a live `session` to.
  */
 declare module "react" {
   namespace JSX {
@@ -15,6 +15,15 @@ declare module "react" {
           editable?: string;
         },
         CollabGraph
+      >;
+      "collab-mermaid": React.DetailedHTMLProps<
+        React.HTMLAttributes<CollabMermaid> & {
+          "visible-types"?: string;
+          direction?: string;
+          theme?: string;
+          kind?: string;
+        },
+        CollabMermaid
       >;
     }
   }

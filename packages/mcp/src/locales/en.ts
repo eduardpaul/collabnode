@@ -157,9 +157,34 @@ export const EN_CATALOG: McpLocaleCatalog = {
       return `Create or update a ${type} edge from ${from} to ${to}.${descPart} Reuses an existing edge with the same endpoints unless id is set.${guidelinesBlurb}`;
     },
     namedTool: (name) => `Named tool ${name}`,
+    view: {
+      description: (name, description, guidanceBlurb) =>
+        `View '${name}'. Returns a named slice of the graph as Markdown.${
+          description ? ` ${description}` : ""
+        }${guidanceBlurb}`,
+      guidanceBlurb: (guidance) => ` What to check: ${guidance}`,
+    },
     nodeRef: {
       idOrPrefix: "Node id or unique id prefix (min 4 characters).",
       identityObject: "Identity object, e.g. { type: 'Task', title: 'Ship' } or { id: '...' }.",
+    },
+    plan: {
+      nodeRef:
+        "A short handle for this node, unique within this plan (e.g. \"epic-1\"). Edges point at it by this value. It is never written to the graph.",
+      nodeId:
+        "The id of an existing node this entry updates. Null when creating a new node. Never a title.",
+      endpoint:
+        "Either the `id` of a node already in the graph, or the `ref` of a node created in this plan. Never a title.",
+      nodes: "Nodes to create or update. Give every one a `ref` so edges can point at it.",
+      edges:
+        "Every relationship in this plan. Structure lives here and nowhere else: never put a parent's id or title in a node's properties.",
+      relationshipsAreEdges:
+        "Relationships to other nodes belong in `edges`, not in these properties.",
+      numberRange: (min, max) => {
+        if (min !== undefined && max !== undefined) return `From ${min} to ${max}.`;
+        return min !== undefined ? `${min} or more.` : `${max} or less.`;
+      },
+      maxLength: (max) => `At most ${max} characters.`,
     },
     nodeUpsert: {
       id: "Existing node id. Omit on create; identity-keyed types find-or-update from identity fields. Random ids are ignored when identity fields match an existing node.",

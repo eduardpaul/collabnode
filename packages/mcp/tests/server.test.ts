@@ -5,6 +5,18 @@ import { parseSchemaDocument } from "@collabnode/schema";
 import { describe, expect, it } from "vitest";
 import { buildTools, toAgentTools, createGraphMcpServer, generateResources, toolName } from "../src/index.ts";
 
+/**
+ * `graph_snapshot`, `graph_query`, `graph_diff_since` and `graph_apply_batch`
+ * are only generated when a workspace opts in through `tools.advanced`. Tests
+ * that drive one of them pass this as the policy.
+ */
+const advancedOpts = {
+  graphKind: "memory",
+  policy: {
+    advanced: ["graph_snapshot", "graph_query", "graph_diff_since", "graph_apply_batch"],
+  },
+} as const;
+
 const schema = parseSchemaDocument(`
 name: TaskBoard
 version: 1
@@ -51,7 +63,7 @@ describe("schema-driven MCP catalog", () => {
       actorId: "peer",
     });
 
-    const tools = buildTools(schema, host, "memory");
+    const tools = buildTools(schema, host, advancedOpts);
     const names = tools.map((tool) => tool.name);
     expect(names).toContain("graph_query");
     expect(names).toContain("graph_history");
@@ -528,7 +540,7 @@ describe("MCP read tools", () => {
       graph: new InMemoryGraphStore(),
       actorId: "host",
     });
-    const tools = buildTools(readSchema, host, "memory");
+    const tools = buildTools(readSchema, host, advancedOpts);
     const upsertFeature = tools.find((tool) => tool.name === "upsert_node_Feature")!;
     const upsertTask = tools.find((tool) => tool.name === "upsert_node_Task")!;
     const upsertPerson = tools.find((tool) => tool.name === "upsert_node_Person")!;
@@ -653,7 +665,7 @@ nodes:
       collab,
       graph: new InMemoryGraphStore(),
     });
-    const tools = buildTools(notes, host, "memory");
+    const tools = buildTools(notes, host, advancedOpts);
     expect(tools.map((tool) => tool.name)).toContain("upsert_node_Note");
     expect(tools.map((tool) => tool.name).some((name) => name.includes("collab"))).toBe(false);
 
@@ -685,7 +697,7 @@ nodes:
       graph: new InMemoryGraphStore(),
       actorId: "host",
     });
-    const tools = buildTools(readSchema, host, "memory");
+    const tools = buildTools(readSchema, host, advancedOpts);
     const upsertFeature = tools.find((tool) => tool.name === "upsert_node_Feature")!;
     const upsertTask = tools.find((tool) => tool.name === "upsert_node_Task")!;
     const list = tools.find((tool) => tool.name === "graph_list")!;
@@ -742,7 +754,7 @@ nodes:
       collab,
     });
 
-    const bound = buildTools(schema, session, "memory");
+    const bound = buildTools(schema, session, advancedOpts);
     const agentTools = toAgentTools(bound);
 
     expect(agentTools.upsert_node_Task).toBeDefined();

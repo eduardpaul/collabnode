@@ -1,3 +1,5 @@
+import type { AnyGraph, EdgeNameOf, GraphTypeMap, NodeNameOf } from "./infer.js";
+
 export const PROPERTY_TYPE_NAMES = [
   "string",
   "number",
@@ -220,6 +222,74 @@ export interface LifecycleDef {
   endWhen?: string;
 }
 
+/**
+ * One named, parameterized slice of the graph: which nodes, which of their
+ * fields, and which relationships between them.
+ *
+ * A view is a *read projection*, deliberately weaker than a query language so
+ * that it runs on every projection mode (`memory` included) and can be redacted
+ * per agent role. `select` answers which nodes, `fields` answers which of their
+ * properties, `edges` answers which relationships. A view carrying nothing but
+ * `select.roots.types` and `fields` is a perfectly good view.
+ */
+export interface ViewDef {
+  /** Short human label — also the tab name a UI renders it under. */
+  title?: I18nString;
+  /** One line. Becomes the description of the generated `view_<name>` tool. */
+  description?: I18nString;
+  /** What the reader should do with what it sees, in the agent's language. */
+  guidance?: I18nStringList;
+  /** Typed parameters, validated with the same rules as workspace params. */
+  params?: Record<string, ParamDef>;
+  select?: ViewSelectDef;
+  /**
+   * Per-node-type field projection. A type not named here keeps every property;
+   * `*` is the fallback for types not named. `id` and `type` are always
+   * available as pseudo-fields.
+   */
+  fields?: Record<string, string[]>;
+  /** Render the relationships between selected nodes. Defaults to true. */
+  edges?: boolean;
+  /** Cap on selected nodes. Defaults to 100. */
+  maxNodes?: number;
+  /** Default rendering. `markdown` suits prompts, `json` suits UIs. */
+  format?: ViewFormat;
+}
+
+export type ViewFormat = "markdown" | "json";
+
+export interface ViewSelectDef {
+  roots?: ViewRootsDef;
+  traverse?: ViewTraverseDef;
+  /** Whole node types pulled in regardless of whether a root reaches them. */
+  include?: string[];
+}
+
+export interface ViewRootsDef {
+  /** Node types the selection starts from. Omit for every visible type. */
+  types?: string[];
+  /**
+   * Expression filtering the roots. Evaluated against
+   * `{ ...node.properties, id, type, params }` — bare identifiers are node
+   * properties, view parameters live under `params.`. Because `==` is loose,
+   * `params.x == null` is the idiomatic "parameter not supplied" test.
+   */
+  where?: string;
+}
+
+export interface ViewTraverseDef {
+  /** Edge types to follow. Omit to follow every edge type. */
+  edges?: string[];
+  /** Defaults to `out`. */
+  direction?: ViewDirection;
+  /** Hops from each root. Defaults to 1. */
+  depth?: number;
+  /** Expression filtering the nodes reached, same context as `roots.where`. */
+  where?: string;
+}
+
+export type ViewDirection = "in" | "out" | "both";
+
 export interface NamedToolDef {
   description?: I18nString;
   creates?: string;
@@ -260,11 +330,38 @@ export interface AgentDef {
    * survived `tools.expose`; omit or leave empty for the same default.
    */
   tools?: string[];
+  /**
+   * Allowlist of view names this role is granted. `*`, or omitting the list,
+   * grants every declared view. Views are filtered by this list first, then by
+   * `tools` like any other tool.
+   */
+  views?: string[];
   /** Per-node-type read/write reach for this role. */
   nodes?: AgentNodePolicy;
   /** Whether to enable internal task planning / todo list for this agent. */
   internalPlanning?: boolean;
 }
+
+/**
+ * Generated tools that are off unless a workspace names them in
+ * `tools.advanced`.
+ *
+ * Each one asks the model to hold the whole graph in its head: `graph_snapshot`
+ * returns it, `graph_diff_since` takes a previous copy of it back as an
+ * argument, `graph_query` needs Cypher to address it, and `graph_apply_batch`
+ * writes a pile of it at once — which also delays every one of those writes
+ * reaching the other participants until the batch lands. Declared `views:` and
+ * the targeted reads (`graph_list`, `graph_get`, `graph_neighbors`) answer the
+ * same questions in far fewer tokens, so the default surface leaves these out.
+ */
+export const ADVANCED_TOOLS = [
+  "graph_snapshot",
+  "graph_query",
+  "graph_diff_since",
+  "graph_apply_batch",
+] as const;
+
+export type AdvancedTool = (typeof ADVANCED_TOOLS)[number];
 
 export interface ToolsPolicyDef {
   /**
@@ -273,6 +370,11 @@ export interface ToolsPolicyDef {
    * as omitting the list. Named tools in `named` are always added on top.
    */
   expose?: string[];
+  /**
+   * Opt back in to tools from `ADVANCED_TOOLS`, which are not generated
+   * otherwise. Unlike `expose`, this is additive: it never removes anything.
+   */
+  advanced?: AdvancedTool[];
   named?: Record<string, NamedToolDef>;
   agents?: AgentDef[];
 }
@@ -296,36 +398,57 @@ export interface WorkspaceType {
   template?: TemplateDef;
   lifecycle?: LifecycleDef;
   tools?: ToolsPolicyDef;
+  /** Named graph slices, shared by the agent tool surface and the UI. */
+  views?: Record<string, ViewDef>;
   projection?: ProjectionMode;
   retention?: RetentionDef;
 }
 
 export type NodeRef = string | { ref: string };
 
-export interface UpsertNodeInput {
-  type: string;
-  properties: Record<string, unknown>;
+interface UpsertNodeOf<S extends GraphTypeMap, T extends NodeNameOf<S>> {
+  type: T;
+  properties: S["nodes"][T]["input"];
   id?: string;
   tags?: string[];
 }
 
-export interface UpsertEdgeInput {
-  type: string;
+/**
+ * One node write.
+ *
+ * Over a known schema this distributes into a union discriminated on `type`, so
+ * `properties` is checked against the node type actually named — and an editor
+ * offers only that type's properties once `type` is filled in.
+ */
+export type UpsertNodeInput<
+  S extends GraphTypeMap = AnyGraph,
+  T extends NodeNameOf<S> = NodeNameOf<S>,
+> = T extends unknown ? UpsertNodeOf<S, T> : never;
+
+interface UpsertEdgeOf<S extends GraphTypeMap, T extends EdgeNameOf<S>> {
+  type: T;
   from: string;
   to: string;
-  properties?: Record<string, unknown>;
+  properties?: S["edges"][T]["input"];
   id?: string;
 }
 
-export type GraphOpInput =
-  | ({ op: "upsertNode"; ref?: string } & UpsertNodeInput)
+export type UpsertEdgeInput<
+  S extends GraphTypeMap = AnyGraph,
+  T extends EdgeNameOf<S> = EdgeNameOf<S>,
+> = T extends unknown ? UpsertEdgeOf<S, T> : never;
+
+interface BatchEdgeOf<S extends GraphTypeMap, T extends EdgeNameOf<S>> {
+  op: "upsertEdge";
+  type: T;
+  from: NodeRef;
+  to: NodeRef;
+  properties?: S["edges"][T]["input"];
+  id?: string;
+}
+
+export type GraphOpInput<S extends GraphTypeMap = AnyGraph> =
+  | ({ op: "upsertNode"; ref?: string } & UpsertNodeInput<S>)
   | { op: "deleteNode"; id: string }
-  | {
-      op: "upsertEdge";
-      type: string;
-      from: NodeRef;
-      to: NodeRef;
-      properties?: Record<string, unknown>;
-      id?: string;
-    }
+  | { [T in EdgeNameOf<S>]: BatchEdgeOf<S, T> }[EdgeNameOf<S>]
   | { op: "deleteEdge"; id: string };

@@ -1,7 +1,15 @@
 import { useState, useEffect, useRef } from "react";
 import { useCollabJoin } from "@collabnode/react";
+import { edgesOfType } from "@collabnode/runtime";
+import type { SolutionPlanner } from "./workspace.types.ts";
 import type { CollabGraph } from "@collabnode/graph-view";
+import type { CollabMermaid } from "./mermaid/element.ts";
 import { markDirtyAndCascade, markParentDirtyOnDelete } from "./agent/dirty.ts";
+import {
+  formatTaskDescription,
+  nextPoints,
+  parsePoints,
+} from "./agent/schemas.ts";
 
 interface AgentLog {
   actor: "manager" | "architect" | "user" | "system";
@@ -48,6 +56,8 @@ export function App() {
   const [c4DraftMarkdown, setC4DraftMarkdown] = useState<string>("");
 
   const graphRef = useRef<CollabGraph | null>(null);
+  const c4MermaidRef = useRef<CollabMermaid | null>(null);
+  const allMermaidRef = useRef<CollabMermaid | null>(null);
 
   // Fetch workspaces list
   const fetchWorkspaces = async () => {
@@ -71,28 +81,66 @@ export function App() {
   // The server owns the document id, the schema, and the relay coordinates;
   // `useCollabJoin` asks for them and connects to what comes back.
   const { session, snapshot, nodesByType, isConnected, isLoading, upsertNode, deleteNode, upsertEdge, deleteEdge } =
-    useCollabJoin(
+    useCollabJoin<SolutionPlanner>(
       `/api/collab/join?workspace=${encodeURIComponent(currentWorkspaceId)}&lang=${lang}`,
       { actorId: "human-user" },
     );
 
-  // Bind session to <collab-graph> web component
+  // Bind session to graph web components
   useEffect(() => {
-    if (graphRef.current && session) {
-      graphRef.current.session = session;
-    }
+    if (!session) return;
+    // The graph and mermaid web components render any workspace, so they take
+    // the untyped session.
+    const untyped = session.as();
+    if (graphRef.current) graphRef.current.session = untyped;
+    if (c4MermaidRef.current) c4MermaidRef.current.session = untyped;
+    if (allMermaidRef.current) allMermaidRef.current.session = untyped;
   }, [session]);
 
   // Extract domain nodes from the live collaborative graph
   const nodes = snapshot?.nodes ?? [];
   const edges = snapshot?.edges ?? [];
+  // The one edge type this board reads by name. Going through `edgesOfType`
+  // means the name is checked against the schema instead of being a string that
+  // quietly matches nothing when it is wrong.
+  const taskEdges = snapshot ? edgesOfType(snapshot, "HAS_TASK") : [];
   const solutionState = nodesByType.SolutionState?.[0];
   const epics = nodesByType.Epic ?? [];
   const features = nodesByType.Feature ?? [];
-  const c4Models = nodesByType.C4Model ?? [];
+  const c4Nodes = nodesByType.C4DiagramElement ?? [];
   const tasks = nodesByType.Task ?? [];
   const risks = nodesByType.Risk ?? [];
   const assumptions = nodesByType.Assumption ?? [];
+
+  // Structure comes off the edges, never off a title copied into a child. A
+  // renamed Epic keeps its Features; a Feature that was never linked shows up
+  // as unassigned instead of silently vanishing from the board.
+  const childrenByParent = (edgeType: string) => {
+    const map = new Map<string, string[]>();
+    for (const edge of edges) {
+      if (edge.type !== edgeType) continue;
+      const list = map.get(edge.from) ?? [];
+      list.push(edge.to);
+      map.set(edge.from, list);
+    }
+    return map;
+  };
+  const featureIdsByEpic = childrenByParent("HAS_FEATURE");
+  const taskIdsByFeature = childrenByParent("HAS_TASK");
+  const featuresById = new Map(features.map((f) => [f.id, f]));
+  const tasksById = new Map(tasks.map((t) => [t.id, t]));
+  const linkedFeatureIds = new Set([...featureIdsByEpic.values()].flat());
+  const linkedTaskIds = new Set([...taskIdsByFeature.values()].flat());
+  const orphanFeatures = features.filter((f) => !linkedFeatureIds.has(f.id));
+  const orphanTasks = tasks.filter((t) => !linkedTaskIds.has(t.id));
+  const featuresOfEpic = (epicId: string) =>
+    (featureIdsByEpic.get(epicId) ?? [])
+      .map((id) => featuresById.get(id))
+      .filter((f): f is NonNullable<typeof f> => f !== undefined);
+  const tasksOfFeature = (featureId: string) =>
+    (taskIdsByFeature.get(featureId) ?? [])
+      .map((id) => tasksById.get(id))
+      .filter((t): t is NonNullable<typeof t> => t !== undefined);
 
   const currentStatus = String(solutionState?.properties.status ?? "idle");
   const managerAgrees = Boolean(solutionState?.properties.managerAgrees);
@@ -102,10 +150,21 @@ export function App() {
   const canReviseDirty =
     dirtyCount > 0 && currentStatus !== "planning" && currentStatus !== "waiting_user_validation";
   const pendingAssumptionId = solutionState?.properties.pendingAssumptionId as string | undefined;
+  // Written by the agent that is mid-run, cleared when its step ends — this is
+  // the only thing on the board that moves *while* an agent is thinking.
+  const activeAgent = String(solutionState?.properties.activeAgent ?? "none");
 
-  const pendingAssumption = assumptions.find(
-    (a) => a.id === pendingAssumptionId || a.properties.status === "pending",
-  );
+  // Only an assumption that is *still pending* gets the banner, and only while
+  // the workflow is actually paused on it. Matching on the id alone kept the
+  // banner up after the user had already approved or rejected it, and the
+  // fallback matched any other pending assumption regardless of which one
+  // SolutionState points at — including once the pause had been lifted.
+  const pendingAssumption =
+    currentStatus === "waiting_user_validation"
+      ? (assumptions.find(
+          (a) => a.id === pendingAssumptionId && a.properties.status === "pending",
+        ) ?? assumptions.find((a) => a.properties.status === "pending"))
+      : undefined;
 
   // Poll agent state and logs for the active workspace
   useEffect(() => {
@@ -331,16 +390,20 @@ export function App() {
   };
 
   // --- Human CRUD Actions on Features ---
-  const handleAddFeature = async (epicTitle: string, epicId: string) => {
+  const handleAddFeature = async (epicId: string) => {
+    const epic = epics.find((e) => e.id === epicId);
+    const epicTitle = String(epic?.properties.title ?? "");
     const title = window.prompt(isEs ? `Nueva Feature para "${epicTitle}":` : `New Feature for "${epicTitle}":`)?.trim();
     if (!title) return;
     const desc = window.prompt(isEs ? "Descripción de la Feature:" : "Feature Description:", "")?.trim() ?? "";
 
     const featId = await upsertNode(
-      { type: "Feature", properties: { title, description: desc, epicTitle, dirty: true } },
+      { type: "Feature", properties: { title, description: desc, dirty: true } },
       { actorId: "human-user" },
     );
 
+    // The edge is what puts the Feature under the Epic. Nothing about the Epic
+    // is copied into the Feature's properties.
     await upsertEdge(
       { type: "HAS_FEATURE", from: epicId, to: featId },
       { actorId: "human-user" },
@@ -372,13 +435,37 @@ export function App() {
     await deleteNode(featId, { actorId: "human-user" });
   };
 
-  // --- Human CRUD Actions on Tasks (6-Axis Estimation) ---
-  const handleAddTask = async () => {
-    const title = window.prompt(isEs ? "Título de la nueva Tarea:" : "Title of new Task:")?.trim();
+  // --- Human CRUD Actions on Tasks (story points + 4 axes) ---
+  const handleAddTask = async (featureId?: string) => {
+    const feature = featureId ? featuresById.get(featureId) : undefined;
+    const title = window.prompt(
+      feature
+        ? isEs
+          ? `Nueva Tarea para "${String(feature.properties.title)}":`
+          : `New Task for "${String(feature.properties.title)}":`
+        : isEs
+          ? "Título de la nueva Tarea:"
+          : "Title of new Task:",
+    )?.trim();
     if (!title) return;
-    const desc = window.prompt(isEs ? "Descripción:" : "Description:", "")?.trim() ?? "";
-    const functionalPoints = window.prompt(isEs ? "Puntos Funcionales (El Qué):" : "Functional Points (What):", isEs ? "Flujo de usuario" : "User journey")?.trim() ?? "";
-    const technicalPoints = window.prompt(isEs ? "Puntos Técnicos (El Cómo):" : "Technical Points (How):", isEs ? "Infraestructura backend" : "Backend infra")?.trim() ?? "";
+    const what = window.prompt(
+      isEs ? "Qué (resultado funcional / flujo de usuario):" : "What (functional outcome / user journey):",
+      "",
+    )?.trim();
+    if (!what) return;
+    const how = window.prompt(
+      isEs ? "Cómo (enfoque técnico / infraestructura):" : "How (technical approach / infrastructure):",
+      "",
+    )?.trim();
+    if (!how) return;
+    const functionalPoints = parsePoints(
+      window.prompt(isEs ? "Puntos funcionales (1-21):" : "Functional points (1-21):", "3"),
+      3,
+    );
+    const technicalPoints = parsePoints(
+      window.prompt(isEs ? "Puntos técnicos (1-21):" : "Technical points (1-21):", "3"),
+      3,
+    );
     const complexity = Number(window.prompt(isEs ? "Complejidad (0 a 5):" : "Complexity (0 to 5):", "2") ?? 2);
     const uncertainty = Number(window.prompt(isEs ? "Incertidumbre (0 a 5):" : "Uncertainty (0 to 5):", "1") ?? 1);
     const friction = Number(window.prompt(isEs ? "Fricción (0 a 5):" : "Friction (0 to 5):", "1") ?? 1);
@@ -389,32 +476,71 @@ export function App() {
         type: "Task",
         properties: {
           title,
-          description: desc,
+          description: formatTaskDescription(what, how, isEs ? "es" : "en"),
           functionalPoints,
           technicalPoints,
           complexity,
           uncertainty,
           friction,
           nfrScale,
-          status: "todo",
           dirty: true,
         },
       },
       { actorId: "human-user" },
     );
+    if (featureId) {
+      await upsertEdge(
+        { type: "HAS_TASK", from: featureId, to: taskId },
+        { actorId: "human-user" },
+      );
+    }
     await markHumanDirty(taskId);
   };
 
-  const handleToggleTaskStatus = async (taskId: string) => {
+  /** Move a Task under a Feature — delete the old HAS_TASK edge, create the new one. */
+  const handleLinkTask = async (taskId: string) => {
+    if (features.length === 0) {
+      window.alert(isEs ? "Crea primero una Feature." : "Create a Feature first.");
+      return;
+    }
+    const menu = features
+      .map((f, i) => `${i + 1}. ${String(f.properties.title)}`)
+      .join("\n");
+    const answer = window.prompt(
+      isEs
+        ? `¿Bajo qué Feature va esta tarea?\n${menu}`
+        : `Which Feature does this task belong to?\n${menu}`,
+      "1",
+    );
+    const choice = Number(answer);
+    const target = features[choice - 1];
+    if (!target) return;
+
+    for (const edge of taskEdges.filter((e) => e.to === taskId)) {
+      await deleteEdge(edge.id, { actorId: "human-user" });
+    }
+    await upsertEdge({ type: "HAS_TASK", from: target.id, to: taskId }, { actorId: "human-user" });
+    await markHumanDirty(taskId);
+  };
+
+  const handleEditTaskDescription = async (taskId: string) => {
     const task = tasks.find((t) => t.id === taskId);
     if (!task) return;
-    const current = String(task.properties.status ?? "todo");
-    const next = current === "todo" ? "doing" : current === "doing" ? "done" : "todo";
+    const title = window.prompt(isEs ? "Editar título:" : "Edit Title:", String(task.properties.title))?.trim();
+    if (!title) return;
+    const desc = window.prompt(
+      isEs
+        ? "Editar descripción (debe incluir Qué y Cómo):"
+        : "Edit Description (must include What and How):",
+      String(task.properties.description ?? ""),
+    )?.trim();
+    if (desc === undefined) return;
 
     await upsertNode(
-      { id: taskId, type: "Task", properties: { ...task.properties, status: next } },
+      { id: taskId, type: "Task", properties: { ...task.properties, title, description: desc, dirty: true } },
       { actorId: "human-user" },
     );
+    await markHumanDirty(taskId);
   };
 
   const handleEditTaskAxis = async (
@@ -424,25 +550,19 @@ export function App() {
     const task = tasks.find((t) => t.id === taskId);
     if (!task) return;
 
-    if (axis === "functionalPoints" || axis === "technicalPoints") {
-      const val = window.prompt(`Edit ${axis}:`, String(task.properties[axis] ?? ""))?.trim();
-      if (val !== undefined && val !== null) {
-        await upsertNode(
-          { id: taskId, type: "Task", properties: { ...task.properties, [axis]: val, dirty: true } },
-          { actorId: "human-user" },
-        );
-        await markHumanDirty(taskId);
-      }
-    } else {
-      const maxVal = axis === "nfrScale" ? 3 : 5;
-      const current = Number(task.properties[axis] ?? 0);
-      const next = current + 1 > maxVal ? 0 : current + 1;
-      await upsertNode(
-        { id: taskId, type: "Task", properties: { ...task.properties, [axis]: next, dirty: true } },
-        { actorId: "human-user" },
-      );
-      await markHumanDirty(taskId);
-    }
+    const current = Number(task.properties[axis] ?? 0);
+    const next =
+      axis === "functionalPoints" || axis === "technicalPoints"
+        ? nextPoints(current)
+        : current + 1 > (axis === "nfrScale" ? 3 : 5)
+          ? 0
+          : current + 1;
+
+    await upsertNode(
+      { id: taskId, type: "Task", properties: { ...task.properties, [axis]: next, dirty: true } },
+      { actorId: "human-user" },
+    );
+    await markHumanDirty(taskId);
   };
 
   const handleDeleteTask = async (taskId: string) => {
@@ -524,15 +644,15 @@ export function App() {
 
   // --- Human C4 Markdown Editing ---
   const handleSaveC4 = async (c4Id: string) => {
-    const c4 = c4Models.find((c) => c.id === c4Id);
+    const c4 = c4Nodes.find((c) => c.id === c4Id);
     if (!c4) return;
     await upsertNode(
       {
         id: c4Id,
-        type: "C4Model",
+        type: "C4DiagramElement",
         properties: {
           ...c4.properties,
-          markdown: c4DraftMarkdown,
+          description: c4DraftMarkdown,
           dirty: true,
         },
       },
@@ -555,6 +675,130 @@ export function App() {
       ];
 
   const activeWsMeta = workspaces.find((w) => w.id === currentWorkspaceId);
+
+  const renderTaskCard = (task: (typeof tasks)[number]) => {
+    const taskDirty = task.properties.dirty === true;
+    const feature = featuresById.get(
+      taskEdges.find((e) => e.to === task.id)?.from ?? "",
+    );
+
+    return (
+                  <div key={task.id} className={`card ${taskDirty ? "dirty" : ""}`}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                      <span className="card-title">
+                        {String(task.properties.title)}
+                        {taskDirty && (
+                          <span className="badge badge-dirty" style={{ marginLeft: "8px" }}>
+                            {isEs ? "Sin revisar" : "Dirty"}
+                          </span>
+                        )}
+                      </span>
+
+                      <div style={{ display: "flex", gap: "4px" }}>
+                        <button
+                          type="button"
+                          className="btn-icon"
+                          onClick={() => handleLinkTask(task.id)}
+                          title={
+                            feature
+                              ? isEs
+                                ? `Feature: ${String(feature.properties.title)} — clic para mover`
+                                : `Feature: ${String(feature.properties.title)} — click to move`
+                              : isEs
+                                ? "Sin Feature — clic para enlazar"
+                                : "No Feature — click to link"
+                          }
+                        >
+                          {feature ? "🔗" : "⛓️‍💥"}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-icon"
+                          onClick={() => handleEditTaskDescription(task.id)}
+                          title={isEs ? "Editar tarea" : "Edit Task"}
+                        >
+                          ✏️
+                        </button>
+                        <button type="button" className="btn-icon" onClick={() => handleDeleteTask(task.id)} title="Delete Task">
+                          🗑️
+                        </button>
+                      </div>
+                    </div>
+
+                    <div
+                      className="card-desc"
+                      style={{ cursor: "pointer", whiteSpace: "pre-wrap" }}
+                      onClick={() => handleEditTaskDescription(task.id)}
+                      title={isEs ? "Haz clic para editar Qué y Cómo" : "Click to edit What and How"}
+                    >
+                      {String(task.properties.description)}
+                    </div>
+
+                    {/* Story points + 4-axis estimation */}
+                    <div className="axes-grid">
+                      <div
+                        className="axis-item"
+                        style={{ cursor: "pointer" }}
+                        onClick={() => handleEditTaskAxis(task.id, "functionalPoints")}
+                        title={isEs ? "Haz clic para subir un peldaño de la escala" : "Click to step up the estimate ladder"}
+                      >
+                        <span className="axis-label">{isEs ? "Funcional" : "Functional"}:</span>
+                        <span className="axis-value">{String(task.properties.functionalPoints ?? 1)} pts ⟳</span>
+                      </div>
+
+                      <div
+                        className="axis-item"
+                        style={{ cursor: "pointer" }}
+                        onClick={() => handleEditTaskAxis(task.id, "technicalPoints")}
+                        title={isEs ? "Haz clic para subir un peldaño de la escala" : "Click to step up the estimate ladder"}
+                      >
+                        <span className="axis-label">{isEs ? "Técnico" : "Technical"}:</span>
+                        <span className="axis-value">{String(task.properties.technicalPoints ?? 1)} pts ⟳</span>
+                      </div>
+
+                      <div
+                        className="axis-item"
+                        style={{ cursor: "pointer" }}
+                        onClick={() => handleEditTaskAxis(task.id, "complexity")}
+                        title={isEs ? "Haz clic para ajustar (0-5)" : "Click to adjust (0-5)"}
+                      >
+                        <span className="axis-label">{isEs ? "Complejidad" : "Complexity"}:</span>
+                        <span className="axis-value">{String(task.properties.complexity ?? 0)}/5 ⟳</span>
+                      </div>
+
+                      <div
+                        className="axis-item"
+                        style={{ cursor: "pointer" }}
+                        onClick={() => handleEditTaskAxis(task.id, "uncertainty")}
+                        title={isEs ? "Haz clic para ajustar (0-5)" : "Click to adjust (0-5)"}
+                      >
+                        <span className="axis-label">{isEs ? "Incertidumbre" : "Uncertainty"}:</span>
+                        <span className="axis-value">{String(task.properties.uncertainty ?? 0)}/5 ⟳</span>
+                      </div>
+
+                      <div
+                        className="axis-item"
+                        style={{ cursor: "pointer" }}
+                        onClick={() => handleEditTaskAxis(task.id, "friction")}
+                        title={isEs ? "Haz clic para ajustar (0-5)" : "Click to adjust (0-5)"}
+                      >
+                        <span className="axis-label">{isEs ? "Fricción" : "Friction"}:</span>
+                        <span className="axis-value">{String(task.properties.friction ?? 0)}/5 ⟳</span>
+                      </div>
+
+                      <div
+                        className="axis-item"
+                        style={{ cursor: "pointer" }}
+                        onClick={() => handleEditTaskAxis(task.id, "nfrScale")}
+                        title={isEs ? "Haz clic para ajustar (0-3)" : "Click to adjust (0-3)"}
+                      >
+                        <span className="axis-label">NFR Scale:</span>
+                        <span className="axis-value">{String(task.properties.nfrScale ?? 0)}/3 ⟳</span>
+                      </div>
+                    </div>
+                  </div>
+    );
+  };
 
   return (
     <div className="app-container">
@@ -744,7 +988,7 @@ export function App() {
             disabled={isSubmitting}
             onClick={() => handleTriggerAgent("architect")}
           >
-            📐 {isEs ? "Ejecutar Arquitecto IA (C4 & Tareas 6 Ejes)" : "Run AI Architect (C4 & 6-Axis Tasks)"}
+            📐 {isEs ? "Ejecutar Arquitecto IA (C4 & Tareas)" : "Run AI Architect (C4 & Tasks)"}
           </button>
         </div>
 
@@ -825,9 +1069,17 @@ export function App() {
             {currentStatus === "planning" && (isEs ? "⚡ Agentes Planificando..." : "⚡ Agents Planning...")}
             {currentStatus === "idle" && (isEs ? "💤 En Espera" : "💤 Idle")}
           </span>
-          <span className={`badge badge-agent ${managerAgrees ? "agreed" : ""}`}>
+          <span
+            className={`badge badge-agent ${
+              activeAgent === "manager" ? "working" : managerAgrees ? "agreed" : ""
+            }`}
+          >
             👔 {isEs ? "Gestor:" : "Manager:"}{" "}
-            {managerAgrees
+            {activeAgent === "manager"
+              ? isEs
+                ? "Trabajando…"
+                : "Working…"
+              : managerAgrees
               ? isEs
                 ? "Aprueba ✓"
                 : "Agreed ✓"
@@ -835,9 +1087,17 @@ export function App() {
               ? "Revisando..."
               : "Reviewing..."}
           </span>
-          <span className={`badge badge-agent ${architectAgrees ? "agreed" : ""}`}>
+          <span
+            className={`badge badge-agent ${
+              activeAgent === "architect" ? "working" : architectAgrees ? "agreed" : ""
+            }`}
+          >
             📐 {isEs ? "Arquitecto:" : "Architect:"}{" "}
-            {architectAgrees
+            {activeAgent === "architect"
+              ? isEs
+                ? "Trabajando…"
+                : "Working…"
+              : architectAgrees
               ? isEs
                 ? "Aprueba ✓"
                 : "Agreed ✓"
@@ -917,7 +1177,7 @@ export function App() {
 
           <div className="item-list">
             {epics.map((epic) => {
-              const epicFeats = features.filter((f) => f.properties.epicTitle === epic.properties.title);
+              const epicFeats = featuresOfEpic(epic.id);
               const epicDirty = epic.properties.dirty === true;
               return (
                 <div key={epic.id} className={`card ${epicDirty ? "dirty" : ""}`}>
@@ -949,7 +1209,7 @@ export function App() {
                       type="button"
                       className="btn-small"
                       style={{ marginLeft: "auto", fontSize: "11px", padding: "2px 6px" }}
-                      onClick={() => handleAddFeature(String(epic.properties.title), epic.id)}
+                      onClick={() => handleAddFeature(epic.id)}
                     >
                       + {isEs ? "Feature" : "Feature"}
                     </button>
@@ -982,6 +1242,10 @@ export function App() {
                             <div style={{ fontSize: "12px", color: "var(--text-muted)" }}>
                               {String(feat.properties.description)}
                             </div>
+                            <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "2px" }}>
+                              {tasksOfFeature(feat.id).length}{" "}
+                              {isEs ? "tarea(s) enlazada(s)" : "linked task(s)"}
+                            </div>
                           </div>
                           <div style={{ display: "flex", gap: "4px" }}>
                             <button type="button" className="btn-icon" onClick={() => handleEditFeature(feat.id)}>
@@ -1006,32 +1270,85 @@ export function App() {
                   : "No epics yet. Click '+ Add Epic' or run the prompt above."}
               </p>
             )}
+
+            {/* A Feature with no HAS_FEATURE edge belongs to no Epic. It would
+                be invisible in an Epic-rooted list, so it gets its own bucket
+                rather than disappearing from the plan. */}
+            {orphanFeatures.length > 0 && (
+              <div className="card dirty">
+                <div className="card-title">
+                  ⚠️ {isEs ? "Features sin Epic" : "Features with no Epic"}
+                </div>
+                <div className="card-desc">
+                  {isEs
+                    ? "Enlázalas a un Epic para que entren en el plan."
+                    : "Link them to an Epic so they count as part of the plan."}
+                </div>
+                {orphanFeatures.map((feat) => (
+                  <div key={feat.id} className="card-meta">
+                    <span>{String(feat.properties.title)}</span>
+                    <button
+                      type="button"
+                      className="btn-icon"
+                      style={{ marginLeft: "auto" }}
+                      onClick={() => handleEditFeature(feat.id)}
+                    >
+                      ✏️
+                    </button>
+                    <button type="button" className="btn-icon" onClick={() => handleDeleteFeature(feat.id)}>
+                      🗑️
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Column 2: Architecture & 6-Axis Tasks (Architect & Human Co-Design) */}
+        {/* Column 2: Architecture & Tasks (Architect & Human Co-Design) */}
         <div className="column">
           <div className="column-head">
             <h2>
-              <span>📐</span> {isEs ? "Arquitectura C4 y Tareas (6 Ejes)" : "C4 & 6-Axis Tasks (Architect)"}
+              <span>📐</span> {isEs ? "Arquitectura C4 y Tareas" : "C4 & Tasks (Architect)"}
             </h2>
             <div style={{ display: "flex", gap: "6px" }}>
-              <button type="button" className="btn-small" onClick={handleAddTask}>
+              <button type="button" className="btn-small" onClick={() => handleAddTask()}>
                 + {isEs ? "Nueva Tarea" : "Add Task"}
               </button>
               <span className="badge badge-agent">{tasks.length} Tasks</span>
             </div>
           </div>
 
-          {/* C4 Architecture Models with Markdown Editor */}
-          {c4Models.map((c4) => {
+          <div className="mermaid-container" title={isEs ? "Diagrama C4 (un nodo por contenedor)" : "C4 diagram (one node per container)"}>
+            <collab-mermaid
+              ref={c4MermaidRef}
+              visible-types="C4DiagramElement"
+              kind="c4"
+              theme="dark"
+            />
+          </div>
+
+          {/* C4 elements: Person, System, Boundary, Container, Component */}
+          {[...c4Nodes]
+            .sort((a, b) => {
+              const order: Record<string, number> = {
+                Person: 0,
+                System: 1,
+                Boundary: 2,
+                Container: 3,
+                Component: 4,
+              };
+              return (order[String(a.properties.type)] ?? 9) - (order[String(b.properties.type)] ?? 9);
+            })
+            .map((c4) => {
             const isEditingThis = editingC4Id === c4.id;
             const c4Dirty = c4.properties.dirty === true;
             return (
               <div key={c4.id} className={`card ${c4Dirty ? "dirty" : ""}`}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <div className="card-title">
-                    🏛️ {String(c4.properties.title)} ({String(c4.properties.level)})
+                    🏛️ {String(c4.properties.title)} ({String(c4.properties.type ?? "C4")}
+                    {c4.properties.external === true ? "_Ext" : ""})
                     {c4Dirty && (
                       <span className="badge badge-dirty" style={{ marginLeft: "8px" }}>
                         {isEs ? "Sin revisar" : "Dirty"}
@@ -1045,7 +1362,7 @@ export function App() {
                       if (isEditingThis) {
                         void handleSaveC4(c4.id);
                       } else {
-                        setC4DraftMarkdown(String(c4.properties.markdown ?? ""));
+                        setC4DraftMarkdown(String(c4.properties.description ?? ""));
                         setEditingC4Id(c4.id);
                       }
                     }}
@@ -1081,130 +1398,68 @@ export function App() {
                       color: "#a5b4fc",
                     }}
                   >
-                    {String(c4.properties.markdown)}
+                    {String(c4.properties.description ?? "")}
                   </pre>
                 )}
               </div>
             );
           })}
 
-          {/* Interactive 6-Axis Tasks */}
+          {/* Tasks, grouped under the Feature each one implements. The grouping
+              is the HAS_TASK edge — a task is never told which feature it
+              belongs to through a property. */}
           <div className="item-list">
-            {tasks.map((task) => {
-              const status = String(task.properties.status ?? "todo");
-              const isDone = status === "done";
-              const taskDirty = task.properties.dirty === true;
-
+            {features.map((feature) => {
+              const featureTasks = tasksOfFeature(feature.id);
               return (
-                <div key={task.id} className={`card ${isDone ? "done" : ""} ${taskDirty ? "dirty" : ""}`}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                      <button
-                        type="button"
-                        className={`task-check ${isDone ? "checked" : ""}`}
-                        onClick={() => handleToggleTaskStatus(task.id)}
-                        title={isEs ? "Cambiar estado (todo/doing/done)" : "Toggle status"}
-                      >
-                        {isDone ? "✓" : status === "doing" ? "⏳" : ""}
-                      </button>
-                      <span className="card-title" style={{ textDecoration: isDone ? "line-through" : "none" }}>
-                        {String(task.properties.title)}
-                        {taskDirty && (
-                          <span className="badge badge-dirty" style={{ marginLeft: "8px" }}>
-                            {isEs ? "Sin revisar" : "Dirty"}
-                          </span>
-                        )}
-                      </span>
-                    </div>
-
-                    <div style={{ display: "flex", gap: "4px" }}>
-                      <button
-                        type="button"
-                        className={`badge badge-status-${status}`}
-                        style={{ cursor: "pointer", border: "none" }}
-                        onClick={() => handleToggleTaskStatus(task.id)}
-                      >
-                        {status.toUpperCase()}
-                      </button>
-                      <button type="button" className="btn-icon" onClick={() => handleDeleteTask(task.id)} title="Delete Task">
-                        🗑️
-                      </button>
-                    </div>
+                <div key={feature.id} className="task-group">
+                  <div className="task-group-head">
+                    <span className="task-group-title">🧩 {String(feature.properties.title)}</span>
+                    <span className="badge badge-agent">
+                      {featureTasks.length} {isEs ? "Tareas" : "Tasks"}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn-small"
+                      onClick={() => handleAddTask(feature.id)}
+                      title={isEs ? "Nueva tarea bajo esta Feature" : "New task under this Feature"}
+                    >
+                      + {isEs ? "Tarea" : "Task"}
+                    </button>
                   </div>
 
-                  <div className="card-desc">{String(task.properties.description)}</div>
+                  {featureTasks.map((task) => renderTaskCard(task))}
 
-                  {/* 6-Axis Estimation Badges with Click-to-Adjust Tuning */}
-                  <div className="axes-grid">
-                    <div
-                      className="axis-full"
-                      style={{ cursor: "pointer" }}
-                      onClick={() => handleEditTaskAxis(task.id, "functionalPoints")}
-                      title={isEs ? "Haz clic para editar" : "Click to edit"}
-                    >
-                      <strong>🎯 {isEs ? "Funcional (Qué):" : "Functional (What):"}</strong>{" "}
-                      {String(task.properties.functionalPoints ?? "N/A")} ✏️
-                    </div>
-
-                    <div
-                      className="axis-full"
-                      style={{ cursor: "pointer" }}
-                      onClick={() => handleEditTaskAxis(task.id, "technicalPoints")}
-                      title={isEs ? "Haz clic para editar" : "Click to edit"}
-                    >
-                      <strong>⚙️ {isEs ? "Técnico (Cómo):" : "Technical (How):"}</strong>{" "}
-                      {String(task.properties.technicalPoints ?? "N/A")} ✏️
-                    </div>
-
-                    <div
-                      className="axis-item"
-                      style={{ cursor: "pointer" }}
-                      onClick={() => handleEditTaskAxis(task.id, "complexity")}
-                      title={isEs ? "Haz clic para ajustar (0-5)" : "Click to adjust (0-5)"}
-                    >
-                      <span className="axis-label">{isEs ? "Complejidad" : "Complexity"}:</span>
-                      <span className="axis-value">{String(task.properties.complexity ?? 0)}/5 ⟳</span>
-                    </div>
-
-                    <div
-                      className="axis-item"
-                      style={{ cursor: "pointer" }}
-                      onClick={() => handleEditTaskAxis(task.id, "uncertainty")}
-                      title={isEs ? "Haz clic para ajustar (0-5)" : "Click to adjust (0-5)"}
-                    >
-                      <span className="axis-label">{isEs ? "Incertidumbre" : "Uncertainty"}:</span>
-                      <span className="axis-value">{String(task.properties.uncertainty ?? 0)}/5 ⟳</span>
-                    </div>
-
-                    <div
-                      className="axis-item"
-                      style={{ cursor: "pointer" }}
-                      onClick={() => handleEditTaskAxis(task.id, "friction")}
-                      title={isEs ? "Haz clic para ajustar (0-5)" : "Click to adjust (0-5)"}
-                    >
-                      <span className="axis-label">{isEs ? "Fricción" : "Friction"}:</span>
-                      <span className="axis-value">{String(task.properties.friction ?? 0)}/5 ⟳</span>
-                    </div>
-
-                    <div
-                      className="axis-item"
-                      style={{ cursor: "pointer" }}
-                      onClick={() => handleEditTaskAxis(task.id, "nfrScale")}
-                      title={isEs ? "Haz clic para ajustar (0-3)" : "Click to adjust (0-3)"}
-                    >
-                      <span className="axis-label">NFR Scale:</span>
-                      <span className="axis-value">{String(task.properties.nfrScale ?? 0)}/3 ⟳</span>
-                    </div>
-                  </div>
+                  {featureTasks.length === 0 && (
+                    <p className="card-desc" style={{ paddingLeft: "8px" }}>
+                      {isEs
+                        ? "Sin tareas todavía. El Arquitecto las creará, o agrégalas con '+ Tarea'."
+                        : "No tasks yet. The Architect will add them, or use '+ Task'."}
+                    </p>
+                  )}
                 </div>
               );
             })}
 
-            {tasks.length === 0 && (
+            {/* A task with no HAS_TASK edge estimates nothing and is skipped by
+                the dirty cascade. Surfaced here so it can be linked. */}
+            {orphanTasks.length > 0 && (
+              <div className="task-group task-group-orphan">
+                <div className="task-group-head">
+                  <span className="task-group-title">
+                    ⚠️ {isEs ? "Tareas sin Feature" : "Tasks with no Feature"}
+                  </span>
+                  <span className="badge badge-dirty">{orphanTasks.length}</span>
+                </div>
+                {orphanTasks.map((task) => renderTaskCard(task))}
+              </div>
+            )}
+
+            {tasks.length === 0 && features.length === 0 && (
               <p className="card-desc">
                 {isEs
-                  ? "Las tareas con estimación de 6 ejes aparecerán aquí al ejecutar el Arquitecto o al agregar '+ Nueva Tarea'."
-                  : "Tasks with 6-axis estimation will appear here when the Architect runs or when you click '+ Add Task'."}
+                  ? "Las tareas con puntos y descripción Qué/Cómo aparecerán aquí al ejecutar el Arquitecto o al agregar '+ Nueva Tarea'."
+                  : "Tasks with story points and What/How descriptions will appear here when the Architect runs or when you click '+ Add Task'."}
               </p>
             )}
           </div>
@@ -1217,6 +1472,14 @@ export function App() {
               <span>🌐</span> {isEs ? "Grafo, Suposiciones y Riesgos" : "Live Graph & Governance"}
             </h2>
             <span className="badge badge-agent">{risks.length + assumptions.length} Items</span>
+          </div>
+
+          <div className="mermaid-container mermaid-all" title={isEs ? "Todos los nodos como Mermaid" : "All nodes as Mermaid"}>
+            <collab-mermaid
+              ref={allMermaidRef}
+              visible-types="Epic,Feature,C4DiagramElement,Task,Risk,Assumption"
+              theme="dark"
+            />
           </div>
 
           {/* Embedded Drop-in <collab-graph> from @collabnode/graph-view */}

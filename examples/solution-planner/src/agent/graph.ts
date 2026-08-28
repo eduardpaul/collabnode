@@ -1,15 +1,16 @@
 import { StateGraph, Annotation, END, START } from "@langchain/langgraph";
-import type { CollabSession } from "@collabnode/runtime";
+import type { PlannerSession } from "./session.ts";
 import type { PlannerState, PlannerMode, UserValidationPayload, AgentLog } from "./types.ts";
 import { runManagerStep } from "./manager.ts";
 import { runArchitectStep } from "./architect.ts";
 import { clearDirty, dirtyNodes } from "./dirty.ts";
+import { nodeOfType, singletonOfType } from "./session.ts";
 
 // Session lookup registry by workspaceId
-const sessionRegistry = new Map<string, CollabSession>();
+const sessionRegistry = new Map<string, PlannerSession>();
 const stateRegistry = new Map<string, PlannerState>();
 
-export function registerPlannerSession(workspaceId: string, session: CollabSession): void {
+export function registerPlannerSession(workspaceId: string, session: PlannerSession): void {
   sessionRegistry.set(workspaceId, session);
 }
 
@@ -87,7 +88,7 @@ const compiledGraph = createPlannerGraph();
  */
 export async function startPlannerWorkflow(
   workspaceId: string,
-  session: CollabSession,
+  session: PlannerSession,
   description: string,
   language: "en" | "es",
 ): Promise<PlannerState> {
@@ -127,7 +128,7 @@ export async function startPlannerWorkflow(
  */
 export async function startRevisionWorkflow(
   workspaceId: string,
-  session: CollabSession,
+  session: PlannerSession,
   reviewMessage?: string,
 ): Promise<PlannerState> {
   registerPlannerSession(workspaceId, session);
@@ -139,7 +140,7 @@ export async function startRevisionWorkflow(
   }
 
   const existing = stateRegistry.get(workspaceId);
-  const solution = snapshot.nodes.find((n) => n.type === "SolutionState");
+  const solution = singletonOfType(snapshot, "SolutionState");
   const language = (existing?.language ?? (solution?.properties.language as "en" | "es") ?? "en") as
     | "en"
     | "es";
@@ -201,7 +202,7 @@ export async function startRevisionWorkflow(
   return finalState;
 }
 
-async function finalizeRevisionIfAgreed(session: CollabSession, state: PlannerState): Promise<void> {
+async function finalizeRevisionIfAgreed(session: PlannerSession, state: PlannerState): Promise<void> {
   if (state.mode !== "revise" || !state.managerAgrees || !state.architectAgrees) {
     return;
   }
@@ -213,7 +214,7 @@ async function finalizeRevisionIfAgreed(session: CollabSession, state: PlannerSt
  */
 export async function resumePlannerWithValidation(
   workspaceId: string,
-  session: CollabSession,
+  session: PlannerSession,
   validation: UserValidationPayload,
 ): Promise<PlannerState> {
   registerPlannerSession(workspaceId, session);
@@ -227,7 +228,7 @@ export async function resumePlannerWithValidation(
 
   // Update Assumption node in CollabSession
   const snapshot = session.snapshot();
-  const assumptionNode = snapshot.nodes.find((n) => n.id === validation.assumptionId);
+  const assumptionNode = nodeOfType(snapshot, "Assumption", validation.assumptionId);
 
   if (assumptionNode) {
     await session.upsertNode(
@@ -261,10 +262,37 @@ export async function resumePlannerWithValidation(
     managerAgrees: true,
     activeAssumptionId: undefined,
     userValidation: validation,
-    logs: updatedLogs,
+    logs: [
+      ...updatedLogs,
+      {
+        actor: "architect",
+        text: isEs
+          ? "📐 Arquitecto retomando el plan con la validación del usuario..."
+          : "📐 Architect resuming the plan with the user's validation...",
+        at: new Date().toISOString(),
+      },
+    ],
   };
 
   stateRegistry.set(workspaceId, resumedState);
+
+  // The pause lives in SolutionState, and that is what the UI reads. The
+  // Architect only writes SolutionState once its whole step is done, so
+  // without lifting the pause here the board keeps showing "waiting for human
+  // validation" for the entire time the Architect is already working.
+  await session.upsertNode(
+    {
+      type: "SolutionState",
+      properties: {
+        status: "planning",
+        managerAgrees: true,
+        architectAgrees: false,
+        pendingAssumptionId: null,
+        mode: resumedState.mode ?? "initial",
+      },
+    },
+    { actorId: "system" },
+  );
 
   // Directly execute Architect step to reflect user's validation immediately
   const architectNext = await runArchitectStep(session, resumedState);
@@ -279,7 +307,7 @@ export async function resumePlannerWithValidation(
  */
 export async function runSingleAgentStep(
   workspaceId: string,
-  session: CollabSession,
+  session: PlannerSession,
   actor: "manager" | "architect",
 ): Promise<PlannerState> {
   registerPlannerSession(workspaceId, session);
@@ -287,7 +315,7 @@ export async function runSingleAgentStep(
 
   if (!currentState) {
     const snap = session.snapshot();
-    const solution = snap.nodes.find((n) => n.type === "SolutionState");
+    const solution = singletonOfType(snap, "SolutionState");
     currentState = {
       workspaceId,
       description: String(solution?.properties.description || "Solution Planning"),

@@ -2,25 +2,381 @@ import { createHub, loadWorkspaceTypeFile, openCollab } from "collabnode";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  startPlannerWorkflow,
-  startRevisionWorkflow,
-  resumePlannerWithValidation,
-} from "./agent/graph.ts";
+  descriptionHasWhatAndHow,
+  isPoint,
+  normalizeTaskProperties,
+  parsePoints,
+} from "./agent/schemas.ts";
 import {
-  clearDirty,
-  dirtyNodes,
-  isDirty,
-  markDirtyAndCascade,
-  markParentDirtyOnDelete,
-} from "./agent/dirty.ts";
+  expandCombinedC4Models,
+  extractC4Boxes,
+  isCombinedC4Diagram,
+  missingC4Levels,
+  splitCombinedC4Plan,
+} from "./agent/c4.ts";
+import { getChatModel } from "./agent/llm.ts";
+import { readOnlyTools } from "@collabnode/deepagents";
+import { applyPlan, emptyPlan, plannerPlanSchema } from "./agent/plan.ts";
+import { getDeepAgentConfig } from "@collabnode/deepagents";
+import { snapshotToMermaid } from "./mermaid/dsl.ts";
+import type { CollabSession } from "@collabnode/runtime";
+import { nodeOfType, nodesOfType, type PlannerSession } from "./agent/session.ts";
+import type { SolutionPlanner } from "./workspace.types.ts";
+import type { WorkspaceType } from "collabnode";
 
 import { config as loadDotEnv } from "dotenv";
+import { z } from "zod";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 loadDotEnv({ path: join(root, ".env") });
+// Graph-protocol tests must stay deterministic. Live Foundry + MCP is `pnpm test:llm`.
+for (const key of [
+  "AZURE_OPENAI_API_KEY",
+  "AZURE_AI_FOUNDRY_KEY",
+  "OPENAI_API_KEY",
+  "GEMINI_API_KEY",
+  "GOOGLE_API_KEY",
+]) {
+  delete process.env[key];
+}
+
+function assertPartialWritesStayPartial(): void {
+  // A partial write must stay partial: an upsert merges over what is stored, so
+  // injecting defaults for absent keys would blank the description and reset
+  // both estimates on a rename.
+  const renameOnly = normalizeTaskProperties(
+    { title: "Renamed task" },
+    { language: "en" },
+  );
+  if (
+    "description" in renameOnly ||
+    "functionalPoints" in renameOnly ||
+    "technicalPoints" in renameOnly
+  ) {
+    throw new Error(
+      `normalizeTaskProperties must not invent absent keys, got ${JSON.stringify(renameOnly)}`,
+    );
+  }
+  const untouched = { title: "T", description: "What: a\nHow: b\n", functionalPoints: 5 };
+  const passthrough = normalizeTaskProperties({ ...untouched }, { language: "en" });
+  if (passthrough.description !== untouched.description || passthrough.functionalPoints !== 5) {
+    throw new Error(`normalizeTaskProperties rewrote an already-clean task: ${JSON.stringify(passthrough)}`);
+  }
+  console.log("✓ normalizeTaskProperties leaves absent and already-clean fields alone");
+}
+
+function assertProviderSelection(): void {
+  // LLM_PROVIDER names the provider outright; an ambient key for another one
+  // must not override it, in either direction.
+  process.env.LLM_PROVIDER = "azure";
+  process.env.GOOGLE_API_KEY = "ambient-gemini-key";
+  if (getChatModel() !== null) {
+    throw new Error("LLM_PROVIDER=azure with no Azure credentials must not fall through to Gemini");
+  }
+  process.env.LLM_PROVIDER = "gemini";
+  const gemini = getChatModel();
+  if (!gemini || !gemini.constructor.name.includes("Google")) {
+    throw new Error(`LLM_PROVIDER=gemini should build a Gemini model, got ${gemini?.constructor.name}`);
+  }
+  delete process.env.LLM_PROVIDER;
+  delete process.env.GOOGLE_API_KEY;
+  console.log("✓ LLM_PROVIDER is honoured for every provider");
+}
+
+function assertNoEmptyBoundary(): void {
+  // Mermaid's C4 grammar has no empty-boundary production; `{ }` is a parse
+  // error that replaces the whole diagram with an error box.
+  const lonelyBoundary = snapshotToMermaid(
+    {
+      schemaId: "solution-planner",
+      schemaHash: "x",
+      nodes: [
+        { id: "b", type: "C4DiagramElement", properties: { type: "Boundary", title: "Empty" }, meta: {} },
+        { id: "s", type: "C4DiagramElement", properties: { type: "System", title: "Portal" }, meta: {} },
+      ],
+      edges: [],
+    },
+    undefined,
+    { kind: "c4" },
+  );
+  if (/\{\s*\}/.test(lonelyBoundary) || lonelyBoundary.includes("System_Boundary(")) {
+    throw new Error(`childless Boundary must not emit an empty block:\n${lonelyBoundary}`);
+  }
+  console.log("✓ A Boundary with no children never emits an unparseable empty block");
+}
+
+function assertPackedC4Splits(): void {
+  // Every packed box becomes an element, whatever the packed node's own type.
+  const packedBoundary = splitCombinedC4Plan([
+    {
+      type: "Boundary",
+      title: "Platform",
+      description: "UI[React Frontend]\n  Hub[Collabnode Hub]\n  Redis[(Redis Registry)]",
+    },
+  ]);
+  const spawned = packedBoundary.filter((el) => el.type === "Container").map((el) => el.title);
+  if (packedBoundary.length !== 4 || spawned.length !== 3) {
+    const got = packedBoundary.map((e) => `${e.type}:${e.title}`).join(", ");
+    throw new Error(`packed Boundary should keep itself + 3 containers, got ${got}`);
+  }
+  console.log("✓ Packed C4 elements split into one element each");
+}
+
+/**
+ * A plan that is all Containers is the failure this reports: a model asked for
+ * "a C4 model" answers with a container diagram — no actor, no external system,
+ * no component — and the board shows a boundary of boxes with nothing around it.
+ */
+function assertC4CoverageIsReported(): void {
+  const containersOnly = [
+    { type: "Boundary" },
+    { type: "Container" },
+    { type: "Container" },
+  ];
+  const missing = missingC4Levels(containersOnly);
+  if (!missing.includes("Person") || !missing.includes("System") || !missing.includes("Component")) {
+    throw new Error(`container-only C4 must report its gaps, got ${JSON.stringify(missing)}`);
+  }
+  const full = [
+    { type: "Person" },
+    { type: "System" },
+    { type: "Boundary" },
+    { type: "Container" },
+    { type: "Component" },
+  ];
+  if (missingC4Levels(full).length !== 0) {
+    throw new Error(`a complete C4 model reports no gap, got ${JSON.stringify(missingC4Levels(full))}`);
+  }
+  console.log("✓ A container-only C4 model reports the levels it is missing");
+}
+
+/**
+ * The plan schema is derived from the workspace YAML, so a property that gains
+ * an enum value or a guideline reaches the model without a second copy of the
+ * schema being edited to match — and there is nowhere in it to name a parent by
+ * title.
+ */
+async function assertPlanSchemaComesFromYaml(): Promise<void> {
+  const architect = await plannerPlanSchema("architect", "en");
+  const asJsonSchema = z.toJSONSchema(architect, { io: "input" }) as {
+    properties?: Record<string, unknown>;
+  };
+  // Read off the JSON Schema rather than the Zod object: this is what the model
+  // is actually handed, and `planEnvelope` returns the plan type, not a shape.
+  const keys = Object.keys(asJsonSchema.properties ?? {});
+  for (const key of ["nodes", "edges", "removeEdges", "agrees", "review"]) {
+    if (!keys.includes(key)) {
+      throw new Error(`plan schema is missing '${key}'`);
+    }
+  }
+  // Key order is prompt order: the model writes its reasoning before the plan
+  // and judges it after.
+  if (keys[0] !== "review" || keys.indexOf("agrees") < keys.indexOf("nodes")) {
+    throw new Error(`plan schema asks its questions out of order: ${keys.join(", ")}`);
+  }
+
+  const json = JSON.stringify(asJsonSchema);
+  for (const banned of ["parentTitle", "featureRef", "c4Ref", "threatensRef", "relatesToRef"]) {
+    if (json.includes(banned)) {
+      throw new Error(`plan schema still carries a title-based handle: ${banned}`);
+    }
+  }
+  // Straight out of the YAML: the C4 kinds and the guideline written next to them.
+  for (const expected of ["Boundary", "Component", "container diagram alone is not a C4 model"]) {
+    if (!json.includes(expected)) {
+      throw new Error(`plan schema lost '${expected}' from the workspace YAML`);
+    }
+  }
+  // Bounds live in the description, never as keywords strict json_schema rejects.
+  if (json.includes('"maximum":21') || json.includes('"minimum":1')) {
+    throw new Error("plan schema leaks declared bounds that strict json_schema rejects");
+  }
+  console.log("✓ The plan schema is generated from the workspace YAML, with no title handles");
+}
+
+/** Endpoints resolve as a plan ref or a live id — and as nothing else. */
+async function assertPlanResolvesByRefAndId(session: PlannerSession): Promise<void> {
+  const epicId = await session.upsertNode(
+    { type: "Epic", properties: { title: "Existing Epic" } },
+    { actorId: "system" },
+  );
+
+  const plan = emptyPlan();
+  plan.nodes.push({ type: "Feature", ref: "f1", properties: { title: "Born in this plan" } });
+  plan.nodes.push({ type: "Risk", ref: "r1", properties: { title: "Linked to a live node", severity: "low" } });
+  // ref → node created in the same batch; id → node already in the graph.
+  plan.edges.push({ type: "HAS_FEATURE", from: epicId, to: "f1" });
+  plan.edges.push({ type: "HAS_RISK", from: epicId, to: "r1" });
+  // A title is not a handle: this one resolves to nothing and is reported.
+  plan.edges.push({ type: "HAS_FEATURE", from: "Existing Epic", to: "f1" });
+
+  const written = await applyPlan(session, plan, { actorId: "ai-manager", language: "en" });
+  if (written.droppedEdges.length !== 1) {
+    throw new Error(`a title endpoint must be dropped and reported, got ${JSON.stringify(written.droppedEdges)}`);
+  }
+
+  const snapshot = session.snapshot();
+  const featureId = written.idsByRef.f1;
+  const hasFeature = snapshot.edges.some(
+    (e) => e.type === "HAS_FEATURE" && e.from === epicId && e.to === featureId,
+  );
+  const hasRisk = snapshot.edges.some(
+    (e) => e.type === "HAS_RISK" && e.from === epicId && e.to === written.idsByRef.r1,
+  );
+  if (!hasFeature || !hasRisk) {
+    throw new Error("plan edges must land on the ids the batch created");
+  }
+  // The Manager stamps the category; the model is not asked for it.
+  const risk = nodeOfType(snapshot, "Risk", written.idsByRef.r1);
+  if (risk?.properties.dirty !== false) {
+    throw new Error("a plan write is never dirty");
+  }
+
+  // The same node again, this time by id: an update, not a second node.
+  const rename = emptyPlan();
+  rename.nodes.push({ type: "Feature", ref: "f1", id: featureId, properties: { title: "Renamed by id" } });
+  await applyPlan(session, rename, { actorId: "ai-manager", language: "en" });
+  const features = nodesOfType(session.snapshot(), "Feature");
+  if (features.length !== 1 || features[0]!.properties.title !== "Renamed by id") {
+    throw new Error(`an entry with an id updates that node, got ${JSON.stringify(features.map((f) => f.properties.title))}`);
+  }
+  console.log("✓ Plan endpoints resolve by ref or id; a title resolves to nothing");
+}
+
+/** The crew reads while composing; every write lands in the one batch, within policy. */
+function assertComposingIsReadOnly(session: CollabSession, type: WorkspaceType): void {
+  // The plan is written once, by the batch. While the crew is *composing* it,
+  // only queries and docs are on the table — a second live write path would
+  // race the batch and one of the two would silently win.
+  for (const role of ["manager", "architect"] as const) {
+    const config = getDeepAgentConfig({ session, workspaceType: type, role });
+    if (config.tools.length === 0) {
+      throw new Error(`${role} got no schema tools at all — check tools.expose in the workspace yaml`);
+    }
+    const composing = readOnlyTools(config.tools).map((t) => t.name);
+    const writes = composing.filter((name) => /(^|_)(upsert|delete|apply_batch)(_|$)/.test(name));
+    if (writes.length > 0) {
+      throw new Error(`${role} could write while composing a plan: ${writes.join(", ")}`);
+    }
+    if (!composing.includes("graph_search") || !composing.includes("graph_list")) {
+      throw new Error(`${role} lost its read tools: ${composing.join(", ")}`);
+    }
+  }
+  // The workspace policy is real, not decorative.
+  const managerTools = getDeepAgentConfig({ session, workspaceType: type, role: "manager" })
+    .tools.map((t) => t.name);
+  if (managerTools.includes("upsert_node_Task") || managerTools.includes("upsert_node_C4DiagramElement")) {
+    throw new Error("nodes.readOnly is not being enforced: manager can write the architect's types");
+  }
+  console.log("✓ Crew reads while composing; writes land only in the batch, within policy");
+}
+
+function assertPointCoercion(): void {
+  const coerced = normalizeTaskProperties(
+    {
+      title: "Wire auth",
+      description: "Implement login",
+      functionalPoints: "User can sign in with Entra ID",
+      technicalPoints: "Easy Auth on Container Apps",
+      complexity: 2,
+    },
+    { language: "en" },
+  );
+  if (!isPoint(coerced.functionalPoints) || !isPoint(coerced.technicalPoints)) {
+    throw new Error("normalizeTaskProperties must store a storable point number, not prose");
+  }
+  if (!descriptionHasWhatAndHow(String(coerced.description))) {
+    throw new Error("prose from point fields must move into description as What/How");
+  }
+  // The only requirement is a number the schema will store: integer, 1-21.
+  // An off-ladder estimate is fine and must survive untouched.
+  const points: Array<[unknown, number]> = [
+    ["8", 8],
+    [4, 4], // not on the Fibonacci ladder, and that is not a problem
+    [3.7, 4],
+    [0, 1],
+    [99, 21],
+    ["User journey", 3],
+    [undefined, 3],
+  ];
+  for (const [input, expected] of points) {
+    if (parsePoints(input) !== expected) {
+      throw new Error(`parsePoints(${JSON.stringify(input)}) should be ${expected}, got ${parsePoints(input)}`);
+    }
+  }
+  console.log("✓ Prose in point fields moves into What/How; any storable integer is kept as-is");
+}
+
+function assertCombinedMermaidSplits(): void {
+    const mermaidDump = `\`\`\`mermaid
+  flowchart TD
+    User([👤 User / Browser])
+    UI[React Frontend]
+    Hub[Collabnode Hub]
+    Redis[(Redis Registry)]
+  \`\`\``;
+    const boxes = extractC4Boxes(mermaidDump);
+    if (boxes.containers.length < 3 || !isCombinedC4Diagram(mermaidDump)) {
+      throw new Error(`expected mermaid dump to contain multiple containers, got ${JSON.stringify(boxes)}`);
+    }
+    const split = expandCombinedC4Models([{ title: "C4 Container Diagram", level: "container", markdown: mermaidDump }]);
+    if (split.length < 3 || split.some((el) => isCombinedC4Diagram(el.markdown))) {
+      throw new Error(`expected split C4 nodes, got ${JSON.stringify(split.map((s) => s.title))}`);
+    }
+    console.log("✓ Combined C4 mermaid splits into one node per container");
+}
+
+function assertC4CompilesToMermaid(): void {
+  const mermaidDsl = snapshotToMermaid(
+    {
+      schemaId: "solution-planner",
+      schemaHash: "x",
+      nodes: [
+        { id: "p", type: "C4DiagramElement", properties: { type: "Person", title: "User" }, meta: {} },
+        { id: "s", type: "C4DiagramElement", properties: { type: "System", title: "Portal" }, meta: {} },
+        { id: "sx", type: "C4DiagramElement", properties: { type: "System", title: "Microsoft Learn", external: true }, meta: {} },
+        { id: "b", type: "C4DiagramElement", properties: { type: "Boundary", title: "Portal" }, meta: {} },
+        { id: "c1", type: "C4DiagramElement", properties: { type: "Container", title: "React SPA" }, meta: {} },
+        { id: "c2", type: "C4DiagramElement", properties: { type: "Container", title: "Redis" }, meta: {} },
+        { id: "c3", type: "C4DiagramElement", properties: { type: "Container", title: "CDN", external: true }, meta: {} },
+      ],
+      edges: [
+        { id: "e1", type: "CONTAINS", from: "b", to: "c1", properties: {}, meta: {} },
+        { id: "e2", type: "CONTAINS", from: "b", to: "c2", properties: {}, meta: {} },
+        { id: "e3", type: "USES", from: "p", to: "c1", properties: {}, meta: {} },
+      ],
+    },
+    undefined,
+    { kind: "c4" },
+  );
+  if (
+    !mermaidDsl.startsWith("C4Container") ||
+    !mermaidDsl.includes("Person(") ||
+    !mermaidDsl.includes("System(") ||
+    !mermaidDsl.includes("System_Ext(") ||
+    !mermaidDsl.includes("System_Boundary(") ||
+    !mermaidDsl.includes("Container(") ||
+    !mermaidDsl.includes("ContainerDb(") ||
+    !mermaidDsl.includes("Container_Ext(") ||
+    !mermaidDsl.includes("Rel(")
+  ) {
+    throw new Error(`expected Mermaid C4 with _Ext for external nodes, got:\n${mermaidDsl}`);
+  }
+  console.log("✓ Snapshot C4 nodes compile to Mermaid C4 DSL with _Ext variants");
+}
 
 async function runTest() {
   console.log("▶ Testing Solution Planner End-to-End...");
+
+  assertPartialWritesStayPartial();
+  assertProviderSelection();
+  assertNoEmptyBoundary();
+  assertPackedC4Splits();
+  assertC4CoverageIsReported();
+  assertPointCoercion();
+  assertCombinedMermaidSplits();
+  assertC4CompilesToMermaid();
+  await assertPlanSchemaComesFromYaml();
 
   // 1. Open collab session (in-memory)
   const { backend, close } = await openCollab({ kind: "memory" }, "server");
@@ -37,274 +393,28 @@ async function runTest() {
 
   console.log("✓ Workspace opened successfully with ID:", ws.id);
 
-  // 2. Trigger Manager agent turn
-  console.log("▶ Triggering Manager agent...");
-  const stateAfterManager = await startPlannerWorkflow(
-    ws.id,
-    ws.session,
-    "Real-time collaborative document editor with AI",
-    "en",
-  );
+  assertComposingIsReadOnly(ws.session, type);
 
-  console.log("✓ State after first turn:", {
-    status: stateAfterManager.status,
-    activeAssumptionId: stateAfterManager.activeAssumptionId,
-    managerAgrees: stateAfterManager.managerAgrees,
-    iteration: stateAfterManager.iteration,
-  });
-
-  if (stateAfterManager.status !== "waiting_user_validation" || !stateAfterManager.activeAssumptionId) {
-    throw new Error(`Expected waiting_user_validation with activeAssumptionId, got ${stateAfterManager.status}`);
-  }
-
-  // 3. Verify Assumption node was created in CollabSession
-  const snap1 = ws.session.snapshot();
-  const assumptionNode = snap1.nodes.find((n) => n.id === stateAfterManager.activeAssumptionId);
-  if (!assumptionNode) {
-    throw new Error("Assumption node not found in graph snapshot");
-  }
-  console.log("✓ Assumption created in graph:", assumptionNode.properties.title);
-
-  // 4. Human-In-The-Loop Validation (Approve)
-  console.log("▶ Human approving assumption...");
-  const stateAfterValidation = await resumePlannerWithValidation(ws.id, ws.session, {
-    assumptionId: stateAfterManager.activeAssumptionId,
-    approved: true,
-    comment: "Approved - Redis + Fluid backbone looks great",
-  });
-
-  console.log("✓ State after resume & architect turn:", {
-    status: stateAfterValidation.status,
-    managerAgrees: stateAfterValidation.managerAgrees,
-    architectAgrees: stateAfterValidation.architectAgrees,
-  });
-
-  // 5. Verify final consensus and graph nodes
-  const snap2 = ws.session.snapshot();
-  const epics = snap2.nodes.filter((n) => n.type === "Epic");
-  const features = snap2.nodes.filter((n) => n.type === "Feature");
-  const tasks = snap2.nodes.filter((n) => n.type === "Task");
-  const c4 = snap2.nodes.filter((n) => n.type === "C4Model");
-  const risks = snap2.nodes.filter((n) => n.type === "Risk");
-
-  // One SolutionState, however many turns the agents took. Without an id on the
-  // write, an upsert of a type with no `identity:` mints a new node each time
-  // and the UI reads whichever one the projection happens to return first.
-  const states = snap2.nodes.filter((n) => n.type === "SolutionState");
-  if (states.length !== 1) {
-    throw new Error(`expected exactly one SolutionState node, found ${states.length}`);
-  }
-
-  console.log("✓ Final graph snapshot contents:");
-  console.log(`  - Epics: ${epics.length}`);
-  console.log(`  - Features: ${features.length}`);
-  console.log(`  - C4 Models: ${c4.length}`);
-  console.log(`  - Tasks: ${tasks.length}`);
-  console.log(`  - Risks: ${risks.length}`);
-
-  if (tasks.length === 0) {
-    throw new Error("Expected tasks to be created by Architect");
-  }
-
-  const dirtyAfterPlan = dirtyNodes(snap2);
-  if (dirtyAfterPlan.length > 0) {
-    throw new Error(`agent-created nodes should not be dirty, found ${dirtyAfterPlan.length}`);
-  }
-
-  // 6. Verify 6-axis task scoring structure
-  const firstTask = tasks[0];
-  console.log("✓ Sample 6-Axis Task Scoring:", {
-    title: firstTask.properties.title,
-    functionalPoints: firstTask.properties.functionalPoints,
-    technicalPoints: firstTask.properties.technicalPoints,
-    complexity: firstTask.properties.complexity,
-    uncertainty: firstTask.properties.uncertainty,
-    friction: firstTask.properties.friction,
-    nfrScale: firstTask.properties.nfrScale,
-  });
-
-  if (
-    firstTask.properties.complexity === undefined ||
-    firstTask.properties.uncertainty === undefined ||
-    firstTask.properties.friction === undefined ||
-    firstTask.properties.nfrScale === undefined ||
-    firstTask.properties.functionalPoints === undefined ||
-    firstTask.properties.technicalPoints === undefined
-  ) {
-    throw new Error("Task missing required 6-axis estimation fields");
-  }
-
-  // 7. Verify Spanish Language Run
-  console.log("▶ Testing Spanish language planner flow...");
-  const wsEs = await hub.open("solution-planner", {
-    id: "test-planner-es",
+  // Its own workspace: this one is about how a plan lands, kept separate from
+  // the workspace the rest of the file opens.
+  const planWs = await hub.open("solution-planner", {
+    id: "test-plan-writes",
     actorId: "server",
-    params: { appName: "Editor Colaborativo", language: "es" },
+    params: { appName: "Plan Writes", language: "en" },
   });
+  await assertPlanResolvesByRefAndId(planWs.session.as<SolutionPlanner>());
 
-  const stateEs1 = await startPlannerWorkflow(
-    wsEs.id,
-    wsEs.session,
-    "Crear un editor colaborativo en tiempo real con IA",
-    "es",
-  );
-
-  if (stateEs1.status !== "waiting_user_validation" || !stateEs1.activeAssumptionId) {
-    throw new Error(`Expected waiting_user_validation for ES run`);
-  }
-
-  const stateEs2 = await resumePlannerWithValidation(wsEs.id, wsEs.session, {
-    assumptionId: stateEs1.activeAssumptionId,
-    approved: true,
-    comment: "Aprobado por el usuario",
-  });
-
-  if (stateEs2.status !== "approved" || !stateEs2.managerAgrees || !stateEs2.architectAgrees) {
-    throw new Error(`Expected approved consensus for ES run`);
-  }
-
-  const snapEs = wsEs.session.snapshot();
-  const tasksEs = snapEs.nodes.filter((n) => n.type === "Task");
-  console.log(`✓ Spanish flow passed with ${tasksEs.length} 6-axis tasks!`);
-
-  // 8. Task status toggle does not mark dirty
-  console.log("▶ Testing dirty cascade and on-demand revision...");
-  const snapBeforeDirty = ws.session.snapshot();
-  const statusTask = snapBeforeDirty.nodes.find((n) => n.type === "Task");
-  if (!statusTask) {
-    throw new Error("Expected a Task for status-toggle dirty test");
-  }
-  await ws.session.upsertNode(
-    {
-      id: statusTask.id,
-      type: "Task",
-      properties: {
-        ...statusTask.properties,
-        status: "doing",
-      },
-    },
-    { actorId: "human-user" },
-  );
-  const afterStatus = ws.session.snapshot().nodes.find((n) => n.id === statusTask.id);
-  if (!afterStatus || isDirty(afterStatus)) {
-    throw new Error("Task.status toggle must not mark the task dirty");
-  }
-  console.log("✓ Task status toggle did not mark dirty");
-
-  // 9. Human edit on an Epic dirties the Epic, Features, and Tasks
-  const epic = snapBeforeDirty.nodes.find((n) => n.type === "Epic");
-  if (!epic) {
-    throw new Error("Expected an Epic for cascade test");
-  }
-  await ws.session.upsertNode(
-    {
-      id: epic.id,
-      type: "Epic",
-      properties: {
-        ...epic.properties,
-        description: "Changed by human — needs crew revision",
-      },
-    },
-    { actorId: "human-user" },
-  );
-  await markDirtyAndCascade(ws.session, epic.id);
-
-  const snapCascaded = ws.session.snapshot();
-  const dirtyEpic = snapCascaded.nodes.find((n) => n.id === epic.id);
-  if (!dirtyEpic || !isDirty(dirtyEpic)) {
-    throw new Error("Edited Epic should be dirty");
-  }
-  const featureIds = snapCascaded.edges
-    .filter((e) => e.type === "HAS_FEATURE" && e.from === epic.id)
-    .map((e) => e.to);
-  if (featureIds.length === 0) {
-    throw new Error("Expected HAS_FEATURE links from Epic for cascade test");
-  }
-  for (const id of featureIds) {
-    const feat = snapCascaded.nodes.find((n) => n.id === id);
-    if (!feat || !isDirty(feat)) {
-      throw new Error(`Feature ${id} should be dirty because its Epic is dirty`);
-    }
-  }
-  const taskIds = snapCascaded.edges
-    .filter((e) => e.type === "HAS_TASK" && featureIds.includes(e.from))
-    .map((e) => e.to);
-  if (taskIds.length === 0) {
-    throw new Error("Expected HAS_TASK links under dirty Epic features");
-  }
-  for (const id of taskIds) {
-    const task = snapCascaded.nodes.find((n) => n.id === id);
-    if (!task || !isDirty(task)) {
-      throw new Error(`Task ${id} should be dirty because its Epic is dirty`);
-    }
-  }
-  const solutionAfterDirty = snapCascaded.nodes.find((n) => n.type === "SolutionState");
-  if (solutionAfterDirty?.properties.managerAgrees || solutionAfterDirty?.properties.architectAgrees) {
-    throw new Error("Consensus should be broken after a human dirty edit");
-  }
-  console.log(
-    `✓ Epic dirty cascaded to ${featureIds.length} feature(s) and ${taskIds.length} task(s)`,
-  );
-
-  // 10. Deleting a Feature dirties the parent Epic
-  await clearDirty(ws.session, { actorId: "human-user" });
-  const snapClean = ws.session.snapshot();
-  const featureToDelete = snapClean.nodes.find(
-    (n) => n.type === "Feature" && featureIds.includes(n.id),
-  );
-  if (!featureToDelete) {
-    throw new Error("Expected a Feature to delete");
-  }
-  await markParentDirtyOnDelete(ws.session, featureToDelete.id);
-  const connected = snapClean.edges.filter(
-    (e) => e.from === featureToDelete.id || e.to === featureToDelete.id,
-  );
-  for (const edge of connected) {
-    await ws.session.deleteEdge(edge.id, { actorId: "human-user" });
-  }
-  await ws.session.deleteNode(featureToDelete.id, { actorId: "human-user" });
-  const epicAfterDelete = ws.session.snapshot().nodes.find((n) => n.id === epic.id);
-  if (!epicAfterDelete || !isDirty(epicAfterDelete)) {
-    throw new Error("Deleting a Feature should dirty the parent Epic");
-  }
-  console.log("✓ Deleting a Feature dirtied the parent Epic");
-
-  // 11. On-demand Manager ↔ Architect revision clears dirty and reaches consensus
-  let stateAfterRevise = await startRevisionWorkflow(ws.id, ws.session);
-  if (stateAfterRevise.status === "waiting_user_validation" && stateAfterRevise.activeAssumptionId) {
-    stateAfterRevise = await resumePlannerWithValidation(ws.id, ws.session, {
-      assumptionId: stateAfterRevise.activeAssumptionId,
-      approved: true,
-      comment: "Approved during dirty revision test",
-    });
-  }
-  if (stateAfterRevise.status !== "approved" || !stateAfterRevise.managerAgrees || !stateAfterRevise.architectAgrees) {
-    throw new Error(
-      `Expected approved consensus after revision, got status=${stateAfterRevise.status}`,
-    );
-  }
-  const snapRevised = ws.session.snapshot();
-  const leftoverDirty = dirtyNodes(snapRevised);
-  if (leftoverDirty.length > 0) {
-    throw new Error(`expected dirty flags cleared after revision, found ${leftoverDirty.length}`);
-  }
-  const epicsAfter = snapRevised.nodes.filter((n) => n.type === "Epic");
-  const tasksAfter = snapRevised.nodes.filter((n) => n.type === "Task");
-  const risksAfter = snapRevised.nodes.filter((n) => n.type === "Risk");
-  if (epicsAfter.length === 0 || tasksAfter.length === 0) {
-    throw new Error("Revision must not wipe Epics/Tasks");
-  }
-  if (risksAfter.length <= risks.length) {
-    throw new Error("Expected revision to add at least one risk while adapting the plan");
-  }
-  console.log(
-    `✓ Revision loop approved with dirty cleared (${epicsAfter.length} epics, ${tasksAfter.length} tasks, ${risksAfter.length} risks)`,
-  );
+  // The end-to-end agent chain that used to run here (Manager turn,
+  // assumption pause, Architect turn, dirty cascade, revision loop) asserted
+  // on nodes that only the deterministic fallback produced when no model is
+  // configured. That fallback is gone, so the chain was asserting on
+  // fabricated data rather than on agent behaviour. Covering it again needs a
+  // stub model driving the agents; see test-llm-planner.ts for the live-model run.
 
   await hub.close();
   await close?.();
 
-  console.log("🎉 All Solution Planner tests passed successfully (EN & ES)!");
+  console.log("🎉 All Solution Planner tests passed successfully!");
 }
 
 runTest().catch((err) => {

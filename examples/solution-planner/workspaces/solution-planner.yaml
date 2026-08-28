@@ -51,6 +51,13 @@ schema:
           default: 0
         pendingAssumptionId:
           type: string
+        # Which agent is mid-run right now. Agents write their results when a
+        # step ends, so without this the board cannot tell "nothing happening"
+        # apart from "an agent has been thinking for a minute".
+        activeAgent:
+          type: enum
+          values: [none, manager, architect]
+          default: none
         mode:
           type: enum
           values: [initial, revise]
@@ -61,8 +68,13 @@ schema:
 
     Epic:
       description:
-        en: High-level business initiative or milestone
-        es: Iniciativa de negocio de alto nivel o hito
+        en: High-level business initiative or milestone. Owns its Features through HAS_FEATURE edges.
+        es: Iniciativa de negocio de alto nivel o hito. Posee sus Features mediante aristas HAS_FEATURE.
+      guidelines:
+        en:
+          - An Epic owns a Feature only through a HAS_FEATURE edge. There is no title/parent property that stands in for it.
+        es:
+          - Una Épica posee un Feature solo a través de una arista HAS_FEATURE. No hay ninguna propiedad de título/padre que la sustituya.
       identity:
         from: [title]
       properties:
@@ -89,8 +101,15 @@ schema:
 
     Feature:
       description:
-        en: Concrete functional capability belonging to an Epic
-        es: Capacidad funcional concreta que pertenece a un Epic
+        en: Concrete functional capability. Reached from its Epic by HAS_FEATURE, and owns its Tasks by HAS_TASK.
+        es: Capacidad funcional concreta. Se alcanza desde su Épica por HAS_FEATURE y posee sus Tasks por HAS_TASK.
+      guidelines:
+        en:
+          - A Feature belongs to exactly one Epic, and that link is the HAS_FEATURE edge — never an epicTitle string.
+          - Every Feature you create must be linked to its Epic in the same write.
+        es:
+          - Un Feature pertenece exactamente a una Épica, y ese vínculo es la arista HAS_FEATURE — nunca una cadena epicTitle.
+          - Todo Feature que crees debe enlazarse a su Épica en la misma escritura.
       identity:
         from: [title]
       properties:
@@ -101,8 +120,6 @@ schema:
             boost: 6
         description:
           type: text
-        epicTitle:
-          type: string
         dirty:
           type: boolean
           default: false
@@ -117,6 +134,15 @@ schema:
       description:
         en: One C4 element. The `type` property is Person, System, Boundary, Container, or Component. `external` renders as Mermaid _Ext.
         es: Un elemento C4. La propiedad `type` es Person, System, Boundary, Container o Component. `external` se dibuja como Mermaid _Ext.
+      guidelines:
+        en:
+          - A container diagram alone is not a C4 model. Model every level that applies - at least one Person for who uses the solution, one Boundary for the system being designed, a System with external:true per third-party system it talks to, and Components inside the Container that carries the most logic.
+          - Boundary groups; System is software. Never model the solution itself as both.
+          - Nesting is the CONTAINS edge (Boundary CONTAINS Container, Container CONTAINS Component), and a call between elements is the USES edge. Never write a parent's title into a property.
+        es:
+          - Un diagrama de contenedores por si solo no es un modelo C4. Modela todos los niveles que apliquen - al menos un Person que usa la solucion, un Boundary para el sistema que se disena, un System con external:true por cada sistema de terceros con el que habla, y Components dentro del Container que concentra mas logica.
+          - Boundary agrupa; System es software. Nunca modeles la propia solucion como ambos.
+          - El anidamiento es la arista CONTAINS (Boundary CONTAINS Container, Container CONTAINS Component), y una llamada entre elementos es la arista USES. Nunca escribas el titulo del padre en una propiedad.
       identity:
         from: [type, title]
       properties:
@@ -151,15 +177,19 @@ schema:
 
     Task:
       description:
-        en: Actionable implementation task with What/How description and Fibonacci functional/technical points
-        es: Tarea ejecutable de implementación con descripción Qué/Cómo y puntos Fibonacci funcionales/técnicos
+        en: Actionable implementation task with a What/How description and functional/technical story points. Reached from its Feature by HAS_TASK.
+        es: Tarea ejecutable de implementación con descripción Qué/Cómo y puntos funcionales/técnicos. Se alcanza desde su Feature por HAS_TASK.
       guidelines:
         en:
-          - functionalPoints and technicalPoints MUST be a Fibonacci integer (1, 2, 3, 5, 8, 13, or 21). Never write a sentence there.
+          - functionalPoints and technicalPoints are integers from 1 to 21 — never a sentence. Estimate on the Fibonacci ladder (1, 2, 3, 5, 8, 13, 21) by convention.
           - Put What (functional outcome) and How (technical approach) in description, using the labels "What:" and "How:".
+          - A Task implements exactly one Feature, and that link is the HAS_TASK edge — never a featureTitle string. Link every Task you create.
+          - Point a Task at the C4 element it changes with TARGETS_C4 when one applies.
         es:
-          - functionalPoints y technicalPoints DEBEN ser un entero Fibonacci (1, 2, 3, 5, 8, 13 o 21). Nunca escribas una frase ahí.
+          - functionalPoints y technicalPoints son enteros de 1 a 21 — nunca una frase. Estima con la escala Fibonacci (1, 2, 3, 5, 8, 13, 21) por convención.
           - Pon el Qué (resultado funcional) y el Cómo (enfoque técnico) en description, con las etiquetas "Qué:" y "Cómo:".
+          - Una Task implementa exactamente un Feature, y ese vínculo es la arista HAS_TASK — nunca una cadena featureTitle. Enlaza toda Task que crees.
+          - Apunta la Task al elemento C4 que modifica con TARGETS_C4 cuando aplique.
       identity:
         from: [title]
       properties:
@@ -173,8 +203,6 @@ schema:
           description:
             en: Must include What (functional outcome / user journey) and How (technical approach, infrastructure, integrations)
             es: Debe incluir Qué (resultado funcional / flujo de usuario) y Cómo (enfoque técnico, infraestructura, integraciones)
-        featureTitle:
-          type: string
         functionalPoints:
           type: number
           integer: true
@@ -182,8 +210,8 @@ schema:
           min: 1
           max: 21
           description:
-            en: INTEGER Fibonacci story points only (1, 2, 3, 5, 8, 13, or 21). Never a sentence. 
-            es: SOLO un entero Fibonacci (1, 2, 3, 5, 8, 13 o 21). Nunca una frase.
+            en: Functional-effort story points, integer 1-21. Fibonacci by convention. Never a sentence.
+            es: Puntos de esfuerzo funcional, entero de 1 a 21. Fibonacci por convención. Nunca una frase.
         technicalPoints:
           type: number
           integer: true
@@ -191,8 +219,8 @@ schema:
           min: 1
           max: 21
           description:
-            en: INTEGER Fibonacci story points only (1, 2, 3, 5, 8, 13, or 21). Never a sentence.
-            es: SOLO un entero Fibonacci (1, 2, 3, 5, 8, 13 o 21). Nunca una frase. 
+            en: Technical-effort story points, integer 1-21. Fibonacci by convention. Never a sentence.
+            es: Puntos de esfuerzo técnico, entero de 1 a 21. Fibonacci por convención. Nunca una frase.
         complexity:
           type: number
           default: 1
@@ -277,7 +305,7 @@ schema:
           default: pending
         raisedBy:
           type: enum
-          values: [manager, architect]
+          values: [manager, architect, human]
           default: manager
         userComment:
           type: text
@@ -291,35 +319,213 @@ schema:
         label: "{title}"
         color: "#f59e0b"
 
+  # The plan's structure lives here, and only here. Epic → Feature → Task is a
+  # path of edges, never a title copied into a property: a rename would silently
+  # orphan the child, and nothing could be walked, cascaded, or viewed.
   edges:
     HAS_FEATURE:
+      description:
+        en: The Epic this Feature belongs to. The only way a Feature is attached to an Epic.
+        es: La Épica a la que pertenece este Feature. La única forma de adjuntar un Feature a una Épica.
       from: [Epic]
       to: [Feature]
       directed: true
+      guidelines:
+        en:
+          - Create this edge in the same write as the Feature. An unlinked Feature is not in the plan.
+          - One Epic per Feature. To move a Feature, delete the old edge and create the new one.
+        es:
+          - Crea esta arista en la misma escritura que el Feature. Un Feature sin enlazar no está en el plan.
+          - Una Épica por Feature. Para mover un Feature, borra la arista anterior y crea la nueva.
     HAS_TASK:
+      description:
+        en: The Feature this Task implements. The only way a Task is attached to the plan.
+        es: El Feature que implementa esta Task. La única forma de adjuntar una Task al plan.
       from: [Feature]
       to: [Task]
       directed: true
+      guidelines:
+        en:
+          - Create this edge in the same write as the Task. An unlinked Task is not estimated against any Feature.
+          - One Feature per Task. To move a Task, delete the old edge and create the new one.
+        es:
+          - Crea esta arista en la misma escritura que la Task. Una Task sin enlazar no estima ningún Feature.
+          - Un Feature por Task. Para mover una Task, borra la arista anterior y crea la nueva.
     HAS_RISK:
-      from: [Epic, Feature, Task]
+      description:
+        en: What this Risk threatens — the Epic, Feature, Task, or C4 element it applies to.
+        es: Lo que amenaza este Riesgo — la Épica, Feature, Task o elemento C4 al que aplica.
+      from: [Epic, Feature, Task, C4DiagramElement]
       to: [Risk]
       directed: true
+      guidelines:
+        en:
+          - Link every Risk to what it threatens. A floating Risk cannot be triaged.
+        es:
+          - Enlaza cada Riesgo con lo que amenaza. Un Riesgo suelto no se puede triar.
     HAS_ASSUMPTION:
+      description:
+        en: What this Assumption is load-bearing for — the Epic, Feature, or Task that depends on it.
+        es: Aquello que depende de esta Suposición — la Épica, Feature o Task afectada.
       from: [Epic, Feature, Task]
       to: [Assumption]
       directed: true
     CONTAINS:
+      description:
+        en: C4 nesting - a Boundary contains its Containers, a Container contains its Components.
+        es: Anidamiento C4 - un Boundary contiene sus Containers, un Container contiene sus Components.
       from: [C4DiagramElement]
       to: [C4DiagramElement]
       directed: true
     USES:
+      description:
+        en: A C4 element calls or depends on another (a Mermaid Rel line).
+        es: Un elemento C4 llama o depende de otro (una línea Rel de Mermaid).
       from: [C4DiagramElement]
       to: [C4DiagramElement]
       directed: true
     TARGETS_C4:
+      description:
+        en: The C4 element a Task builds or changes.
+        es: El elemento C4 que una Task construye o modifica.
       from: [Task]
       to: [C4DiagramElement]
       directed: true
+
+# Named graph slices. Declared once here, then reached three ways: as
+# `view_<name>` MCP tools the agents call, as a catalogue in their system
+# prompts, and by the UI through the join payload.
+views:
+  review_plan:
+    title:
+      en: Review plan
+      es: Revisar plan
+    description:
+      en: Epics with their features, tasks and the estimations on those tasks.
+      es: Épicas con sus features, tareas y las estimaciones de esas tareas.
+    guidance:
+      en:
+        - Every Feature should have at least one Task.
+        - functionalPoints and technicalPoints must be Fibonacci integers (1, 2, 3, 5, 8, 13, 21).
+      es:
+        - Cada Feature debería tener al menos una Task.
+        - functionalPoints y technicalPoints deben ser enteros Fibonacci (1, 2, 3, 5, 8, 13, 21).
+    params:
+      epic:
+        type: string
+        description:
+          en: Epic title or id to scope the review to. Omit to review the whole plan.
+          es: Título o id del Epic a revisar. Omítelo para revisar todo el plan.
+    select:
+      roots:
+        types: [Epic]
+        where: "params.epic == null || title == params.epic || id == params.epic"
+      traverse:
+        edges: [HAS_FEATURE, HAS_TASK]
+        direction: out
+        depth: 2
+    fields:
+      Epic: [title, description, priority, dirty]
+      Feature: [title, description, dirty]
+      Task:
+        [
+          title,
+          description,
+          functionalPoints,
+          technicalPoints,
+          complexity,
+          uncertainty,
+          friction,
+          nfrScale,
+          dirty,
+        ]
+    maxNodes: 200
+
+  business_scope:
+    title:
+      en: Business scope
+      es: Alcance de negocio
+    description:
+      en: The business scope the architecture must serve — epics, features, assumptions and risks.
+      es: El alcance de negocio que la arquitectura debe cubrir — épicas, features, suposiciones y riesgos.
+    select:
+      roots:
+        types: [Epic, Feature, Assumption, Risk]
+    fields:
+      Epic: [title, description, priority]
+      Feature: [title, description]
+      Assumption: [title, description, status, raisedBy, userComment]
+      Risk: [title, description, severity, category, mitigation]
+
+  full_plan:
+    title:
+      en: Full plan
+      es: Plan completo
+    description:
+      en: Everything currently in the plan, across business and architecture.
+      es: Todo lo que hay ahora en el plan, negocio y arquitectura.
+    select:
+      roots:
+        types: [Epic, Feature, Task, C4DiagramElement, Assumption, Risk]
+    maxNodes: 300
+
+  dirty_review:
+    title:
+      en: Pending revision
+      es: Revisión pendiente
+    description:
+      en: Nodes the human changed that the crew has not revised yet, plus one hop of context.
+      es: Nodos que el usuario cambió y el equipo aún no ha revisado, más un salto de contexto.
+    guidance:
+      en:
+        - Adapt only these nodes and their relationships. Do not regenerate the plan.
+      es:
+        - Adapta solo estos nodos y sus relaciones. No regeneres el plan.
+    select:
+      roots:
+        types: [Epic, Feature, Task, C4DiagramElement, Assumption, Risk]
+        where: "dirty == true"
+      traverse:
+        direction: both
+        depth: 1
+
+  architecture:
+    title:
+      en: Architecture
+      es: Arquitectura
+    description:
+      en: The C4 elements and how they contain and use each other.
+      es: Los elementos C4 y cómo se contienen y se usan entre sí.
+    select:
+      roots:
+        types: [C4DiagramElement]
+    fields:
+      C4DiagramElement: [title, type, description, technology, external]
+
+  revision_writeback:
+    title:
+      en: Revision write-back
+      es: Escritura de revisión
+    description:
+      en: The properties a revision is allowed to write, per node type.
+      es: Las propiedades que una revisión puede escribir, por tipo de nodo.
+    fields:
+      Epic: [title, description, priority]
+      Feature: [title, description]
+      C4DiagramElement: [title, type, description, technology, external]
+      Task:
+        [
+          title,
+          description,
+          functionalPoints,
+          technicalPoints,
+          complexity,
+          uncertainty,
+          friction,
+          nfrScale,
+        ]
+      Risk: [title, description, severity, category, mitigation]
+      Assumption: [title, description, raisedBy, userComment]
 
 params:
   appName:
@@ -366,18 +572,27 @@ tools:
       systemPrompt:
         en: |
           You are an AI Product Manager collaborating on this graph in real time.
-          - Analyze the user requirements and create 2-3 high-level Epics using upsert_node_Epic.
-          - Break down each Epic into 2 concrete Features using upsert_node_Feature and link them with upsert_edge_HAS_FEATURE.
-          - Identify 1-2 business risks and link them with upsert_node_Risk and upsert_edge_HAS_RISK.
-          - If iteration is 1 or this is the initial plan, create ONE critical assumption for human validation using upsert_node_Assumption with status: pending and raisedBy: manager.
-          - Update SolutionState to signal your agreement (managerAgrees: true).
+          Inspect the graph with graph_list / graph_search / graph_get before you answer.
+          Then return a plan; the runtime writes it to the graph as one atomic revision.
+          - 2-3 high-level Epics, each broken down into 2 concrete Features.
+          - Structure is edges, never strings: a Feature hangs off its Epic by HAS_FEATURE.
+            Do not restate a parent's title inside a child's properties — no epicTitle, no featureTitle.
+          - 1-2 business risks, each attached by HAS_RISK to the Epic or Feature it threatens.
+          - On the initial plan, ONE critical assumption for human validation, attached by
+            HAS_ASSUMPTION to the Epic it is load-bearing for.
+          - State plainly whether you agree with the current business scope.
         es: |
           Eres un Gerente de Producto IA colaborando en este grafo en tiempo real.
-          - Analiza los requerimientos del usuario y crea 2-3 Épicas usando upsert_node_Epic.
-          - Desglosa cada Épica en 2 Features concretos usando upsert_node_Feature y enlázalos con upsert_edge_HAS_FEATURE.
-          - Identifica 1-2 riesgos de negocio y enlázalos con upsert_node_Risk y upsert_edge_HAS_RISK.
-          - Si es la iteración 1 o el plan inicial, plantea UNA suposición crítica para validación humana usando upsert_node_Assumption con status: pending y raisedBy: manager.
-          - Actualiza SolutionState para señalar tu acuerdo (managerAgrees: true).
+          Inspecciona el grafo con graph_list / graph_search / graph_get antes de responder.
+          Luego devuelve un plan; el runtime lo escribe en el grafo como una única revisión atómica.
+          - 2-3 Épicas, cada una desglosada en 2 Features concretos.
+          - La estructura son aristas, nunca cadenas: un Feature cuelga de su Épica por HAS_FEATURE.
+            No repitas el título del padre dentro del hijo — ni epicTitle, ni featureTitle.
+          - 1-2 riesgos de negocio, cada uno unido por HAS_RISK a la Épica o Feature que amenaza.
+          - En el plan inicial, UNA suposición crítica para validación humana, unida por
+            HAS_ASSUMPTION a la Épica de la que depende.
+          - Indica claramente si estás de acuerdo con el alcance de negocio actual.
+      views: [full_plan, review_plan, dirty_review]
       nodes:
         readOnly: [C4DiagramElement, Task]
 
@@ -385,30 +600,33 @@ tools:
       actorId: ai-architect
       internalPlanning: false
       description:
-        en: AI Software Architect responsible for C4 architecture diagrams, Fibonacci-scored tasks, and technical risks.
-        es: Arquitecto de Software IA responsable de diagramas C4, tareas con puntos Fibonacci y riesgos técnicos.
+        en: AI Software Architect responsible for C4 architecture diagrams, scored tasks, and technical risks.
+        es: Arquitecto de Software IA responsable de diagramas C4, tareas con puntos y riesgos técnicos.
       systemPrompt:
         en: |
           You are an AI Software Architect collaborating on this graph in real time.
-          - Inspect epics and features using graph_list or graph_search.
-          - Create C4 with upsert_node_C4DiagramElement. One node type; set properties.type to Person, System, Boundary, Container, or Component. Boundary is grouping only (System_Boundary), never a software system. System is software. external:true renders as Person_Ext / System_Ext / Container_Ext.
-          - Link Boundary to its Containers with upsert_edge_CONTAINS. Link Person/Container interactions with upsert_edge_USES.
-          - Create technical tasks for features using upsert_node_Task. Description MUST include What (functional outcome) and How (technical approach). Score functionalPoints and technicalPoints as Fibonacci story points (1, 2, 3, 5, 8, 13, 21), plus complexity, uncertainty, friction, nfrScale. Tasks have no status.
-          - Link Features to Tasks using upsert_edge_HAS_TASK.
-          - Link Tasks to C4 elements with upsert_edge_TARGETS_C4.
-          - Identify technical risks and link them with upsert_node_Risk and upsert_edge_HAS_RISK.
-          - Consult Microsoft Learn MCP tools when Azure/Microsoft services or libraries are involved.
-          - Update SolutionState to signal your agreement (architectAgrees: true).
+          Inspect epics and features with graph_list / graph_search, and consult the
+          Microsoft Learn MCP tools when Azure/Microsoft services or libraries are involved.
+          Then return a plan; the runtime writes it to the graph as one atomic revision.
+          - C4: one C4DiagramElement per element, with type Person, System, Boundary, Container, or Component. Boundary is grouping only (System_Boundary), never a software system. System is software. external:true renders as Person_Ext / System_Ext / Container_Ext. Never pack several containers into one element.
+          - Cover every C4 level that applies, not only containers: at least one Person, one Boundary for the system being designed, a System with external:true per third-party system it talks to, and Components inside the Container that carries the most logic.
+          - C4 nesting is the CONTAINS edge: Boundary CONTAINS its Containers, Container CONTAINS its Components. Draw call dependencies with USES.
+          - Technical tasks for the features. description MUST include What (functional outcome) and How (technical approach). functionalPoints and technicalPoints are integers from 1 to 21 (Fibonacci by convention), plus complexity, uncertainty, friction, nfrScale. Tasks have no status.
+          - Every Task hangs off the Feature it implements by a HAS_TASK edge, and points at the C4 element it changes by TARGETS_C4. Structure is edges, never strings — never write a featureTitle property.
+          - Technical risks, each attached by HAS_RISK to what it threatens.
+          - State plainly whether you agree with the resulting architecture and estimates.
         es: |
           Eres un Arquitecto de Software IA colaborando en este grafo en tiempo real.
-          - Inspecciona epics y features usando graph_list o graph_search.
-          - Crea C4 con upsert_node_C4DiagramElement. Un solo tipo de nodo; properties.type es Person, System, Boundary, Container o Component. Boundary solo agrupa (System_Boundary), nunca es un sistema de software. System es software. external:true se dibuja Person_Ext / System_Ext / Container_Ext.
-          - Enlaza Boundary a sus Containers con upsert_edge_CONTAINS. Enlaza interacciones Person/Container con upsert_edge_USES.
-          - Crea tareas técnicas con upsert_node_Task. La descripción DEBE incluir Qué (resultado funcional) y Cómo (enfoque técnico). functionalPoints y technicalPoints son puntos Fibonacci (1, 2, 3, 5, 8, 13, 21), más complexity, uncertainty, friction, nfrScale. Las tareas no tienen status.
-          - Enlaza Features a Tasks usando upsert_edge_HAS_TASK.
-          - Enlaza Tasks a elementos C4 con upsert_edge_TARGETS_C4.
-          - Identifica riesgos técnicos y enlázalos con upsert_node_Risk y upsert_edge_HAS_RISK.
-          - Consulta herramientas de Microsoft Learn cuando apliquen servicios o bibliotecas Azure/Microsoft.
-          - Actualiza SolutionState para señalar tu acuerdo (architectAgrees: true).
+          Inspecciona epics y features con graph_list / graph_search, y consulta las
+          herramientas de Microsoft Learn cuando apliquen servicios o bibliotecas Azure/Microsoft.
+          Luego devuelve un plan; el runtime lo escribe en el grafo como una única revisión atómica.
+          - C4: un C4DiagramElement por elemento, con type Person, System, Boundary, Container o Component. Boundary solo agrupa (System_Boundary), nunca es un sistema de software. System es software. external:true se dibuja Person_Ext / System_Ext / Container_Ext. Nunca metas varios contenedores en un solo elemento.
+          - Cubre todos los niveles C4 que apliquen, no solo contenedores: al menos un Person, un Boundary para el sistema que se disena, un System con external:true por cada sistema de terceros con el que habla, y Components dentro del Container que concentra mas logica.
+          - El anidamiento C4 es la arista CONTAINS: un Boundary CONTAINS sus Containers, un Container CONTAINS sus Components. Dibuja las dependencias de llamada con USES.
+          - Tareas técnicas para las features. La descripción DEBE incluir Qué (resultado funcional) y Cómo (enfoque técnico). functionalPoints y technicalPoints son enteros de 1 a 21 (Fibonacci por convención), más complexity, uncertainty, friction, nfrScale. Las tareas no tienen status.
+          - Toda Task cuelga por HAS_TASK del Feature que implementa, y apunta por TARGETS_C4 al elemento C4 que modifica. La estructura son aristas, nunca cadenas — nunca escribas una propiedad featureTitle.
+          - Riesgos técnicos, cada uno unido por HAS_RISK a lo que amenaza.
+          - Indica claramente si estás de acuerdo con la arquitectura y las estimaciones resultantes.
+      views: [business_scope, full_plan, review_plan, architecture, dirty_review]
       nodes:
         readOnly: [Epic]

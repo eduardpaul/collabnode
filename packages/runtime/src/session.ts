@@ -42,9 +42,16 @@ import {
   singletonId,
   partitionNodeProperties,
   guidelinesFor,
+  type AnyGraph,
   type CrdtPropertyType,
+  type EdgeNameOf,
+  type GraphOpInput,
   type GraphSchema,
+  type GraphTypeMap,
+  type NodeRef,
   type PropertyDef,
+  type UpsertEdgeInput,
+  type UpsertNodeInput,
   type WorkspaceType,
   SchemaError,
 } from "@collabnode/schema";
@@ -84,58 +91,46 @@ export interface MutationOptions {
   actorId?: string;
 }
 
-export interface UpsertNodeInput {
-  type: string;
-  properties: Record<string, unknown>;
-  id?: string;
-  /** Replace the tag set. Omit to leave existing; `[]` clears. */
-  tags?: string[];
-}
-
-export interface UpsertEdgeInput {
-  type: string;
-  from: string;
-  to: string;
-  properties?: Record<string, unknown>;
-  id?: string;
-}
+/**
+ * The write shapes come from `@collabnode/schema`, where they are generic over
+ * a workspace's type map. `tags` on a node upsert replaces the tag set: omit it
+ * to leave what is stored, pass `[]` to clear it.
+ */
+export type { UpsertEdgeInput, UpsertNodeInput } from "@collabnode/schema";
 
 /**
  * An endpoint in a batch: a node id, or `{ ref }` naming an entry earlier in
  * the same batch. Refs are what make a batch expressive enough to seed a graph
  * whose ids do not exist until the batch is planned.
  */
-export type NodeRef = string | { ref: string };
+export type { NodeRef, GraphOpInput } from "@collabnode/schema";
 
-export type GraphOpInput =
-  | ({ op: "upsertNode"; ref?: string } & UpsertNodeInput)
-  | { op: "deleteNode"; id: string }
-  | {
-      op: "upsertEdge";
-      type: string;
-      from: NodeRef;
-      to: NodeRef;
-      properties?: Record<string, unknown>;
-      id?: string;
-    }
-  | { op: "deleteEdge"; id: string };
+/**
+ * Collects writes for one atomic batch.
+ *
+ * The generic parameter is here for the *caller* — `type` is checked against
+ * the schema's node and edge names, and `properties` against the type actually
+ * named. Inside, each op is spread into a union member TypeScript cannot
+ * correlate while `T` is still generic, so each push carries one cast. Narrowing
+ * that away would mean writing the builder per node type, which is a lot of
+ * machinery to prove something the signature above already guarantees.
+ */
+export class BatchBuilder<S extends GraphTypeMap = AnyGraph> {
+  readonly ops: GraphOpInput<S>[] = [];
 
-export class BatchBuilder {
-  readonly ops: GraphOpInput[] = [];
-
-  upsertNode(input: UpsertNodeInput, ref?: string): NodeRef {
-    this.ops.push({ op: "upsertNode", ref, ...input });
+  upsertNode(input: UpsertNodeInput<S>, ref?: string): NodeRef {
+    this.ops.push({ op: "upsertNode", ref, ...input } as unknown as GraphOpInput<S>);
     return ref ? { ref } : (input.id ?? "");
   }
 
-  upsertEdge(input: {
-    type: string;
+  upsertEdge<T extends EdgeNameOf<S>>(input: {
+    type: T;
     from: NodeRef;
     to: NodeRef;
-    properties?: Record<string, unknown>;
+    properties?: S["edges"][T]["input"];
     id?: string;
   }): void {
-    this.ops.push({ op: "upsertEdge", ...input });
+    this.ops.push({ op: "upsertEdge", ...input } as unknown as GraphOpInput<S>);
   }
 
   deleteNode(id: string): void {
@@ -154,6 +149,25 @@ export interface ApplyOpsResult {
   refs: Record<string, string>;
   /** CRDT ops actually committed; lower than `ids.length` when writes were no-ops. */
   applied: number;
+}
+
+/**
+ * Drops a value's schema types on the way into the implementation.
+ *
+ * Everything below this line validates against the *runtime* schema and has no
+ * use for the compile-time one, so the generic parameter is erased once, here,
+ * rather than being threaded through planners and validators that would gain
+ * nothing from it. The public signature is what enforces the types; this is the
+ * seam where that enforcement has already happened.
+ */
+function loose<T>(value: T): T extends GraphSnapshot<GraphTypeMap>
+  ? GraphSnapshot
+  : T extends UpsertNodeInput<GraphTypeMap>
+    ? UpsertNodeInput
+    : T extends UpsertEdgeInput<GraphTypeMap>
+      ? UpsertEdgeInput
+      : never {
+  return value as never;
 }
 
 function provenanceFor(schema: GraphSchema, actorId: string | undefined): Provenance | undefined {
@@ -582,7 +596,17 @@ function planBatchEntry(context: BatchContext, input: GraphOpInput): PlannedEntr
   return planBatchDelete(context, input);
 }
 
-export class CollabSession {
+/**
+ * A live workspace: reads, writes, presence and the CRDT document behind them.
+ *
+ * The optional type parameter is a workspace's type map — the `GraphTypes<…>`
+ * a generated module exports. Supplying it narrows every read and write to that
+ * schema's own node and edge types; leaving it off keeps the untyped shapes
+ * this class has always had, which is why nothing downstream had to change.
+ * Supply it at the boundary (`CollabSession.open<Planner>(…)`) or with `as()`
+ * on a session handed over by something generic, like the hub.
+ */
+export class CollabSession<S extends GraphTypeMap = AnyGraph> {
   private constructor(
     readonly id: string,
     readonly schema: GraphSchema,
@@ -604,22 +628,40 @@ export class CollabSession {
    * the same document. The create/join pair it replaces made the caller decide
    * which of the two to call, which is a race no application can win.
    */
-  static async open(
+  static async open<S extends GraphTypeMap = AnyGraph>(
     id: string | undefined,
     options: CollabSessionOptions,
-  ): Promise<CollabSession> {
+  ): Promise<CollabSession<S>> {
     const handle = await options.collab.open(id, options.schema, {
       actorId: options.actorId,
       peerKind: options.peerKind,
     });
-    return CollabSession.connect(options.schema, options, handle);
+    return CollabSession.connect<S>(options.schema, options, handle);
   }
 
-  private static async connect(
+  /**
+   * The same session, seen through a workspace's types.
+   *
+   * A session that arrives from something schema-agnostic — the hub, a join
+   * route, a test helper — is a `CollabSession<AnyGraph>`. This is how an
+   * application that does know its schema puts the types back on, without a
+   * reconnect and without an `as` at every call site downstream.
+   *
+   * It also goes the other way: `session.as()` with no type argument drops back
+   * to the untyped session, which is what library code that serves *any* schema
+   * asks for. The parameter is invariant — it is both read and written — so a
+   * typed session is not silently a substitute for an untyped one, and saying
+   * so explicitly is better than every such API guessing.
+   */
+  as<S2 extends GraphTypeMap = AnyGraph>(): CollabSession<S2> {
+    return this as unknown as CollabSession<S2>;
+  }
+
+  private static async connect<S extends GraphTypeMap = AnyGraph>(
     schema: GraphSchema,
     options: CollabSessionOptions,
     handle: CollabHandle,
-  ): Promise<CollabSession> {
+  ): Promise<CollabSession<S>> {
     for (const node of handle.graph.snapshot().nodes) {
       await handle.graph.ensureCollab(node.id, node.type);
     }
@@ -629,7 +671,7 @@ export class CollabSession {
     };
     const projector = new Projector(schema, scope, handle.graph, options.graph);
     await projector.start();
-    return new CollabSession(
+    return new CollabSession<S>(
       handle.id,
       schema,
       options.actorId,
@@ -652,8 +694,8 @@ export class CollabSession {
     return this.store !== undefined;
   }
 
-  snapshot(): GraphSnapshot {
-    return this.handle.graph.snapshot();
+  snapshot(): GraphSnapshot<S> {
+    return this.handle.graph.snapshot() as unknown as GraphSnapshot<S>;
   }
 
   /**
@@ -729,8 +771,8 @@ export class CollabSession {
     );
   }
 
-  onChange(listener: ProjectorListener): () => void {
-    return this.projector.on(listener);
+  onChange(listener: ProjectorListener<S>): () => void {
+    return this.projector.on(listener as unknown as ProjectorListener);
   }
 
   /**
@@ -782,10 +824,10 @@ export class CollabSession {
     return this.store.query(this.scope(), cypher, params);
   }
 
-  async upsertNode(input: UpsertNodeInput, options?: MutationOptions): Promise<string> {
+  async upsertNode(input: UpsertNodeInput<S>, options?: MutationOptions): Promise<string> {
     const index = new SnapshotIndex(this.schema, this.handle.graph.snapshot());
     const provenance = provenanceFor(this.schema, this.resolveActor(options));
-    const plan = planNodeUpsert(this.schema, index, input, provenance, this.tracksHistory());
+    const plan = planNodeUpsert(this.schema, index, loose(input), provenance, this.tracksHistory());
     if (plan.op) {
       this.handle.graph.apply(plan.op);
     }
@@ -805,7 +847,7 @@ export class CollabSession {
    * Entries resolve in order and see each other: a node can name itself with
    * `ref`, and a later edge can point at it with `{ ref }`.
    */
-  async applyOps(inputs: GraphOpInput[], options?: MutationOptions): Promise<ApplyOpsResult> {
+  async applyOps(inputs: GraphOpInput<S>[], options?: MutationOptions): Promise<ApplyOpsResult> {
     const index = new SnapshotIndex(this.schema, this.handle.graph.snapshot());
     const context: BatchContext = {
       schema: this.schema,
@@ -843,18 +885,18 @@ export class CollabSession {
   /**
    * Alias for applyOps to apply a batch of graph operations atomically.
    */
-  async applyBatch(ops: GraphOpInput[], options?: MutationOptions): Promise<ApplyOpsResult> {
-    return this.applyOps(ops, options);
+  async applyBatch(ops: GraphOpInput<S>[], options?: MutationOptions): Promise<ApplyOpsResult> {
+    return this.applyOps(ops as GraphOpInput<S>[], options);
   }
 
   /**
    * Execute a batch of mutations using a fluent BatchBuilder.
    */
   async batch(
-    fn: (b: BatchBuilder) => void | Promise<void>,
+    fn: (b: BatchBuilder<S>) => void | Promise<void>,
     options?: MutationOptions,
   ): Promise<ApplyOpsResult> {
-    const builder = new BatchBuilder();
+    const builder = new BatchBuilder<S>();
     await fn(builder);
     return this.applyOps(builder.ops, options);
   }
@@ -863,14 +905,14 @@ export class CollabSession {
    * Computes the diff between a previous snapshot and the current state,
    * returning structural ops, human/LLM-readable markdown, and a boolean flag.
    */
-  diffSince(previousSnapshot: GraphSnapshot): {
+  diffSince(previousSnapshot: GraphSnapshot<S>): {
     ops: GraphOp[];
     markdown: string;
     hasChanges: boolean;
   } {
     const current = this.snapshot();
-    const ops = diffSnapshots(previousSnapshot, current);
-    const markdown = diffSnapshotsToMarkdown(previousSnapshot, current);
+    const ops = diffSnapshots(loose(previousSnapshot), loose(current));
+    const markdown = diffSnapshotsToMarkdown(loose(previousSnapshot), loose(current));
     return {
       ops,
       markdown,
@@ -888,7 +930,9 @@ export class CollabSession {
     params?: Record<string, unknown>,
     options?: MutationOptions,
   ): Promise<ApplyOpsResult> {
-    const ops = compileTemplate(type, params);
+    // A template is compiled from the runtime WorkspaceType, so its ops are
+    // only ever as typed as that schema — which is to say, not.
+    const ops = compileTemplate(type, params) as GraphOpInput<S>[];
     return this.applyOps(ops, options);
   }
 
@@ -909,10 +953,10 @@ export class CollabSession {
     await this.projector.drain();
   }
 
-  async upsertEdge(input: UpsertEdgeInput, options?: MutationOptions): Promise<string> {
+  async upsertEdge(input: UpsertEdgeInput<S>, options?: MutationOptions): Promise<string> {
     const index = new SnapshotIndex(this.schema, this.handle.graph.snapshot());
     const provenance = provenanceFor(this.schema, this.resolveActor(options));
-    const planned = planEdgeUpsert(this.schema, index, input, provenance, this.tracksHistory());
+    const planned = planEdgeUpsert(this.schema, index, loose(input), provenance, this.tracksHistory());
     this.handle.graph.apply(planned.op);
     await this.projector.drain();
     return planned.id;

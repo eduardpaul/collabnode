@@ -1,11 +1,15 @@
-export type PropertyValue =
-  | string
-  | number
-  | boolean
-  | null
-  | { [key: string]: unknown }
-  | unknown[];
-export type PropertyMap = Record<string, PropertyValue>;
+import type {
+  AnyGraph,
+  EdgeNameOf,
+  GraphTypeMap,
+  NodeNameOf,
+  PropertyMap,
+} from "@collabnode/schema";
+
+// Declared in `@collabnode/schema` because the generic write shapes there are
+// stated in terms of them; re-exported here because this is where every caller
+// has always imported them from.
+export type { AnyGraph, GraphTypeMap, PropertyMap, PropertyValue } from "@collabnode/schema";
 
 export interface Provenance {
   actorId: string;
@@ -19,28 +23,88 @@ export interface EntityMeta {
   updatedBy?: string;
 }
 
-export interface GraphNodeRecord {
+interface NodeRecordOf<S extends GraphTypeMap, T extends NodeNameOf<S>> {
   id: string;
-  type: string;
-  properties: PropertyMap;
+  type: T;
+  properties: S["nodes"][T]["props"];
   tags?: string[];
   meta: EntityMeta;
 }
 
-export interface GraphEdgeRecord {
+/**
+ * One node, as it comes back from a snapshot.
+ *
+ * Over a known schema this is a union discriminated on `type`, so
+ * `nodes.find((n) => n.type === "Epic")` narrows `properties` to that type's
+ * own shape with no cast. `T extends unknown` is what distributes it: without
+ * that the result would be one record whose `type` and `properties` are
+ * independent unions, and every node would appear to have every property.
+ */
+export type GraphNodeRecord<
+  S extends GraphTypeMap = AnyGraph,
+  T extends NodeNameOf<S> = NodeNameOf<S>,
+> = T extends unknown ? NodeRecordOf<S, T> : never;
+
+interface EdgeRecordOf<S extends GraphTypeMap, T extends EdgeNameOf<S>> {
+  id: string;
+  type: T;
+  from: string;
+  to: string;
+  properties: S["edges"][T]["props"];
+  meta: EntityMeta;
+}
+
+export type GraphEdgeRecord<
+  S extends GraphTypeMap = AnyGraph,
+  T extends EdgeNameOf<S> = EdgeNameOf<S>,
+> = T extends unknown ? EdgeRecordOf<S, T> : never;
+
+/**
+ * The least a helper needs to identify or render one node, whatever workspace it
+ * came from.
+ *
+ * `GraphNodeRecord` over a known schema and over `AnyGraph` are not assignable
+ * to each other — a schema's `properties` is an object type with optional keys,
+ * `AnyGraph`'s is a `PropertyMap`, and neither contains the other. Read-only
+ * helpers take this instead of picking a side, and accept both.
+ */
+export interface NodeLike {
+  id: string;
+  type: string;
+  properties: Record<string, unknown>;
+  tags?: string[];
+  meta?: EntityMeta;
+}
+
+export interface EdgeLike {
   id: string;
   type: string;
   from: string;
   to: string;
-  properties: PropertyMap;
-  meta: EntityMeta;
+  properties: Record<string, unknown>;
+  meta?: EntityMeta;
 }
 
-export interface GraphSnapshot {
+/**
+ * A snapshot of *some* workspace, for code that only reads it.
+ *
+ * `GraphSnapshot<AnyGraph>` is not this: its properties are a `PropertyMap`,
+ * whose values exclude `undefined`, so a schema-typed snapshot carrying an
+ * optional property is not assignable to it. Helpers that walk, render or diff
+ * a snapshot without caring whose it is take this instead, and then accept both.
+ */
+export interface AnySnapshot {
   schemaId: string;
   schemaHash: string;
-  nodes: GraphNodeRecord[];
-  edges: GraphEdgeRecord[];
+  nodes: NodeLike[];
+  edges: EdgeLike[];
+}
+
+export interface GraphSnapshot<S extends GraphTypeMap = AnyGraph> {
+  schemaId: string;
+  schemaHash: string;
+  nodes: GraphNodeRecord<S>[];
+  edges: GraphEdgeRecord<S>[];
 }
 
 export interface HistoryFieldDiff {

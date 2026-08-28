@@ -1,4 +1,10 @@
-import type { GraphEdgeRecord, GraphNodeRecord, GraphSnapshot } from "./ops.js";
+import type {
+  AnyGraph,
+  GraphEdgeRecord,
+  GraphNodeRecord,
+  GraphSnapshot,
+  GraphTypeMap,
+} from "./ops.js";
 
 export type WalkDirection = "in" | "out" | "both";
 
@@ -13,16 +19,16 @@ export interface WalkOptions {
   limit?: number;
 }
 
-export interface WalkHop {
+export interface WalkHop<S extends GraphTypeMap = AnyGraph> {
   depth: number;
   direction: "in" | "out";
   fromId: string;
-  edge: GraphEdgeRecord;
-  node: GraphNodeRecord;
+  edge: GraphEdgeRecord<S>;
+  node: GraphNodeRecord<S>;
 }
 
-export interface WalkResult {
-  hops: WalkHop[];
+export interface WalkResult<S extends GraphTypeMap = AnyGraph> {
+  hops: WalkHop<S>[];
   truncated?: true;
 }
 
@@ -32,7 +38,11 @@ export interface WalkResult {
  * callers that already resolved the node (MCP `graph_neighbors`) can require it
  * themselves.
  */
-export function walk(snapshot: GraphSnapshot, startId: string, options: WalkOptions = {}): WalkResult {
+export function walk<S extends GraphTypeMap = AnyGraph>(
+  snapshot: GraphSnapshot<S>,
+  startId: string,
+  options: WalkOptions = {},
+): WalkResult<S> {
   const nodesById = new Map(snapshot.nodes.map((node) => [node.id, node]));
   if (!nodesById.has(startId)) {
     return { hops: [] };
@@ -52,7 +62,7 @@ export function walk(snapshot: GraphSnapshot, startId: string, options: WalkOpti
     return limit === 0 ? { hops: [], truncated: true } : { hops: [] };
   }
 
-  const hops: WalkHop[] = [];
+  const hops: WalkHop<S>[] = [];
   const seen = new Set<string>([startId]);
   let frontier = [startId];
   let truncated = false;

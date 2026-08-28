@@ -157,9 +157,34 @@ export const ES_CATALOG: McpLocaleCatalog = {
       return `Crea o actualiza una arista ${type} de ${from} a ${to}.${descPart} Reutiliza una arista existente con los mismos extremos a menos que se establezca id.${guidelinesBlurb}`;
     },
     namedTool: (name) => `Herramienta con nombre ${name}`,
+    view: {
+      description: (name, description, guidanceBlurb) =>
+        `Vista '${name}'. Devuelve una porción del grafo en Markdown.${
+          description ? ` ${description}` : ""
+        }${guidanceBlurb}`,
+      guidanceBlurb: (guidance) => ` Qué revisar: ${guidance}`,
+    },
     nodeRef: {
       idOrPrefix: "Id del nodo o prefijo de id único (mínimo 4 caracteres).",
       identityObject: "Objeto de identidad, ej. { type: 'Task', title: 'Ship' } o { id: '...' }.",
+    },
+    plan: {
+      nodeRef:
+        "Un identificador corto para este nodo, único dentro de este plan (p. ej. \"epic-1\"). Las aristas lo referencian por este valor. Nunca se escribe en el grafo.",
+      nodeId:
+        "El id de un nodo existente que esta entrada actualiza. Null al crear un nodo nuevo. Nunca un título.",
+      endpoint:
+        "El `id` de un nodo que ya existe en el grafo, o el `ref` de un nodo creado en este plan. Nunca un título.",
+      nodes: "Nodos a crear o actualizar. Da un `ref` a cada uno para que las aristas puedan apuntarlo.",
+      edges:
+        "Todas las relaciones de este plan. La estructura vive aquí y en ningún otro sitio: nunca pongas el id o el título del padre en las propiedades de un nodo.",
+      relationshipsAreEdges:
+        "Las relaciones con otros nodos van en `edges`, no en estas propiedades.",
+      numberRange: (min, max) => {
+        if (min !== undefined && max !== undefined) return `De ${min} a ${max}.`;
+        return min !== undefined ? `${min} o más.` : `${max} o menos.`;
+      },
+      maxLength: (max) => `Máximo ${max} caracteres.`,
     },
     nodeUpsert: {
       id: "Id de nodo existente. Omitir al crear; los tipos con clave de identidad buscan o actualizan a partir de los campos de identidad. Los ids aleatorios se ignoran cuando los campos de identidad coinciden con un nodo existente.",

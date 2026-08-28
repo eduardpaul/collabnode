@@ -41,6 +41,17 @@ export {
 } from "./i18n.js";
 export { toolName, promptName } from "./names.js";
 export { propertyZod, propertiesZod } from "./property-zod.js";
+export {
+  nodeZod,
+  planZod,
+  planEnvelope,
+  type GraphPlan,
+  type PlanEdge,
+  type PlanNode,
+  type NodeZodOptions,
+  type PlanZodOptions,
+  type ZodPropertyMode,
+} from "./plan-zod.js";
 export { serveMcpStdio } from "./stdio.js";
 export { serveMcpHttp, toWebRequest, writeWebResponse, readBody } from "./http.js";
 export { createGraphMcpHandler, type GraphMcpHandlerOptions } from "./handler.js";

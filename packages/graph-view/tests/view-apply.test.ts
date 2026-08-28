@@ -136,6 +136,51 @@ describe("projectGraph", () => {
   });
 });
 
+describe("visibleNodeIds", () => {
+  it("shows only the listed nodes, and hides the edges that leave them", () => {
+    const { nodes, edges } = projectGraph(schema, seeded, {
+      ...emptyFilters(),
+      visibleNodeIds: new Set(["t1"]),
+    });
+    expect(nodes.find((node) => node.id === "t1")?.hidden).toBe(false);
+    expect(nodes.find((node) => node.id === "p1")?.hidden).toBe(true);
+    expect(edges[0]?.hidden).toBe(true);
+  });
+
+  it("does not restrict anything when absent", () => {
+    expect(
+      projectGraph(schema, seeded, emptyFilters()).nodes.every((n) => n.hidden === false),
+    ).toBe(true);
+  });
+
+  it("hides everything when the allowlist is present but empty", () => {
+    const filters = { ...emptyFilters(), visibleNodeIds: new Set<string>() };
+    expect(projectGraph(schema, seeded, filters).nodes.every((n) => n.hidden === true)).toBe(true);
+  });
+
+  it("composes with the type filters — a node must satisfy both", () => {
+    const { nodes } = projectGraph(schema, seeded, {
+      ...emptyFilters(),
+      visibleNodeTypes: new Set(["Person"]),
+      visibleNodeIds: new Set(["t1"]),
+    });
+    expect(nodes.every((node) => node.hidden === true)).toBe(true);
+  });
+
+  it("survives patchFilters and toggleNodeType", () => {
+    const patched = patchFilters(emptyFilters(), { visibleNodeIds: new Set(["t1"]) });
+    expect(patched.visibleNodeIds).toEqual(new Set(["t1"]));
+    expect(toggleNodeType(patched, "Person").visibleNodeIds).toEqual(new Set(["t1"]));
+    expect(patchFilters(patched, { search: "x" }).visibleNodeIds).toEqual(new Set(["t1"]));
+  });
+
+  it("keeps an empty allowlist through patchFilters, and clears it on an explicit undefined", () => {
+    const empty = patchFilters(emptyFilters(), { visibleNodeIds: new Set<string>() });
+    expect(empty.visibleNodeIds).toEqual(new Set());
+    expect(patchFilters(empty, { visibleNodeIds: undefined }).visibleNodeIds).toBeUndefined();
+  });
+});
+
 describe("parseVisibleTypes", () => {
   it("parses a comma-separated visible-types attribute", () => {
     expect([...parseVisibleTypes("Epic,Feature,Task,Note")!].sort()).toEqual([

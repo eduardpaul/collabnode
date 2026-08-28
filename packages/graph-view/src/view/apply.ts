@@ -7,6 +7,15 @@ export interface ViewFilters {
   hiddenEdgeTypes: ReadonlySet<string>;
   search: string;
   visibleNodeTypes?: ReadonlySet<string>;
+  /**
+   * Exactly which nodes to show, by id. This is what a resolved `views:` slice
+   * produces — a view selects *nodes*, not types, so `visibleNodeTypes` cannot
+   * express one. Absent means "no id restriction"; present it composes with the
+   * type filters, and a node must satisfy both. An *empty* set is a restriction
+   * like any other: a view that selects nothing shows nothing, which is what
+   * distinguishes it from having no view bound at all.
+   */
+  visibleNodeIds?: ReadonlySet<string>;
 }
 
 export interface ViewNode {
@@ -85,8 +94,19 @@ export function nodeTypeHidden(filters: ViewFilters, type: string): boolean {
   return Boolean(visible && visible.size > 0 && !visible.has(type));
 }
 
+/** Whether one specific node is excluded by an id allowlist. */
+export function nodeIdHidden(filters: ViewFilters, id: string): boolean {
+  const visible = filters.visibleNodeIds;
+  return Boolean(visible && !visible.has(id));
+}
+
 function cloneVisibleTypes(types: ReadonlySet<string> | undefined): Set<string> | undefined {
   return types && types.size > 0 ? new Set(types) : undefined;
+}
+
+/** Unlike a type allowlist, an id allowlist keeps its empty state — see `ViewFilters`. */
+function cloneVisibleIds(ids: ReadonlySet<string> | undefined): Set<string> | undefined {
+  return ids ? new Set(ids) : undefined;
 }
 
 /** Merge a partial `filters` assignment. An explicit `visibleNodeTypes` is a layer: allow-listed types are un-hidden. */
@@ -111,7 +131,14 @@ export function patchFilters(current: ViewFilters, patch: Partial<ViewFilters>):
     }
   }
 
-  return { hiddenNodeTypes, hiddenEdgeTypes, search, visibleNodeTypes };
+  // Keyed on presence, not on value: `{ visibleNodeIds: undefined }` is how a
+  // dismissed view drops its restriction, and an empty set is a real one.
+  const visibleNodeIds =
+    "visibleNodeIds" in patch
+      ? cloneVisibleIds(patch.visibleNodeIds)
+      : cloneVisibleIds(current.visibleNodeIds);
+
+  return { hiddenNodeTypes, hiddenEdgeTypes, search, visibleNodeTypes, visibleNodeIds };
 }
 
 export function toggleNodeType(filters: ViewFilters, type: string): ViewFilters {
@@ -130,6 +157,7 @@ export function toggleNodeType(filters: ViewFilters, type: string): ViewFilters 
     hiddenEdgeTypes: new Set(filters.hiddenEdgeTypes),
     search: filters.search,
     visibleNodeTypes,
+    visibleNodeIds: cloneVisibleIds(filters.visibleNodeIds),
   };
 }
 
@@ -212,7 +240,7 @@ function toViewNode(
 ): ViewNode {
   const background = nodeColor(schema, node);
   const border = accentBorder(background);
-  const hiddenByType = nodeTypeHidden(filters, node.type);
+  const hiddenByType = nodeTypeHidden(filters, node.type) || nodeIdHidden(filters, node.id);
   const hiddenBySearch = !matchesSearch(schema, node, filters.search, snapshot);
   return {
     id: node.id,

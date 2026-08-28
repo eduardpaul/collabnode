@@ -3,6 +3,7 @@ import { loadSchemaFile, schemaToAgeDdl, schemaToDdl } from "collabnode";
 import { parseArgs, USAGE } from "./args.js";
 import { mcp } from "./mcp.js";
 import { serve } from "./serve.js";
+import { types } from "./types.js";
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv);
@@ -43,6 +44,10 @@ async function main(): Promise<void> {
     for (const line of lines) {
       console.log(`${line};`);
     }
+    return;
+  }
+  if (args.command === "types") {
+    await types(args);
     return;
   }
   if (args.command === "serve") {

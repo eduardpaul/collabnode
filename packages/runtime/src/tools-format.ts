@@ -1,4 +1,10 @@
-import type { GraphEdgeRecord, GraphNodeRecord, GraphSnapshot } from "@collabnode/graph";
+import type {
+  EdgeLike,
+  GraphEdgeRecord,
+  GraphNodeRecord,
+  GraphSnapshot,
+  NodeLike,
+} from "@collabnode/graph";
 import { resolveI18nString, uiFor, type GraphSchema } from "@collabnode/schema";
 
 /** Search/snapshot cap so chunk and body dumps cannot fill a context window. */
@@ -45,7 +51,7 @@ export function fallbackNodeLabel(type: string, properties: Record<string, unkno
   return `${type} ${id.slice(0, 8)}`;
 }
 
-export function nodeLabel(schema: GraphSchema, node: GraphNodeRecord): string {
+export function nodeLabel(schema: GraphSchema, node: NodeLike): string {
   const template = resolveI18nString(uiFor(schema, "node", node.type)?.label);
   if (template) {
     const label = interpolateLabel(template, node.properties);
@@ -56,7 +62,7 @@ export function nodeLabel(schema: GraphSchema, node: GraphNodeRecord): string {
   return fallbackNodeLabel(node.type, node.properties, node.id);
 }
 
-export function edgeLabel(schema: GraphSchema, edge: GraphEdgeRecord): string {
+export function edgeLabel(schema: GraphSchema, edge: EdgeLike): string {
   const template = resolveI18nString(uiFor(schema, "edge", edge.type)?.label);
   if (template) {
     const label = interpolateLabel(template, edge.properties);
@@ -205,7 +211,7 @@ export function nodeSummary(schema: GraphSchema, node: GraphNodeRecord, compact 
   };
 }
 
-export function nodeKeyProperties(schema: GraphSchema, node: GraphNodeRecord): Record<string, unknown> {
+export function nodeKeyProperties(schema: GraphSchema, node: NodeLike): Record<string, unknown> {
   const def = schema.nodes[node.type];
   const keys: string[] = [];
   const add = (key: string) => {

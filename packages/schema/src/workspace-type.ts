@@ -1,6 +1,7 @@
 import { parse as parseYaml } from "yaml";
 import { ZodError } from "zod";
-import { ALL_NODE_TYPES } from "./agent-policy.js";
+import { ALL_NODE_TYPES, ALL_TOOLS } from "./agent-policy.js";
+import { parseExpression } from "./expr.js";
 import { normalizePropertyMap, parseSchemaDocument } from "./parse.js";
 
 import {
@@ -13,6 +14,7 @@ import {
   type RetentionDef,
   type TemplateDef,
   type ToolsPolicyDef,
+  type ViewDef,
   type WorkspaceType,
 } from "./types.js";
 import { rawWorkspaceType, type RawWorkspaceType } from "./zod-schema.js";
@@ -110,13 +112,118 @@ function assertTemplate(
 }
 
 /**
+ * Names a view may not take, because the generated tool would shadow — or be
+ * shadowed by — a tool that already exists. Views are exposed as `view_<name>`,
+ * so a view called `node_Epic` would collide with nothing, but one that spells
+ * out a whole tool name would.
+ */
+const RESERVED_TOOL_PREFIXES = ["graph_", "upsert_node_", "upsert_edge_", "view_"];
+
+/** Fields every node carries regardless of its declared properties. */
+const PSEUDO_FIELDS = new Set(["id", "type"]);
+
+/**
+ * A view names node types, edge types and property names, and carries two
+ * expressions. All four are checked here rather than at render time: a typo in
+ * a `where` must be a schema error, because `interpolateTemplate` degrades a
+ * broken expression to an empty string and a view that silently selects nothing
+ * is far worse than one that refuses to load.
+ */
+function assertViews(
+  schema: WorkspaceType["schema"],
+  views: Record<string, ViewDef>,
+  named: ToolsPolicyDef["named"],
+): void {
+  for (const [name, view] of Object.entries(views)) {
+    const at = `views.${name}`;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new SchemaError(
+        `view name '${name}' must be alphanumeric with underscores, so it can become a tool name`,
+        at,
+      );
+    }
+    for (const prefix of RESERVED_TOOL_PREFIXES) {
+      if (name.startsWith(prefix)) {
+        throw new SchemaError(
+          `view name '${name}' must not start with '${prefix}': it is exposed as 'view_${name}' and would shadow a generated tool`,
+          at,
+        );
+      }
+    }
+    if (named && name in named) {
+      throw new SchemaError(`view '${name}' collides with a named tool of the same name`, at);
+    }
+
+    const rootTypes = view.select?.roots?.types ?? [];
+    for (const [i, type] of rootTypes.entries()) {
+      if (!(type in schema.nodes)) {
+        throw new SchemaError(
+          `view '${name}' selects undeclared node type '${type}'`,
+          `${at}.select.roots.types[${i}]`,
+        );
+      }
+    }
+    for (const [i, type] of (view.select?.include ?? []).entries()) {
+      if (!(type in schema.nodes)) {
+        throw new SchemaError(
+          `view '${name}' includes undeclared node type '${type}'`,
+          `${at}.select.include[${i}]`,
+        );
+      }
+    }
+    for (const [i, type] of (view.select?.traverse?.edges ?? []).entries()) {
+      if (!(type in schema.edges)) {
+        throw new SchemaError(
+          `view '${name}' traverses undeclared edge type '${type}'`,
+          `${at}.select.traverse.edges[${i}]`,
+        );
+      }
+    }
+
+    for (const [type, fields] of Object.entries(view.fields ?? {})) {
+      if (type === ALL_NODE_TYPES) {
+        continue;
+      }
+      const def = schema.nodes[type];
+      if (!def) {
+        throw new SchemaError(
+          `view '${name}' projects fields of undeclared node type '${type}'`,
+          `${at}.fields.${type}`,
+        );
+      }
+      for (const [i, field] of fields.entries()) {
+        if (!PSEUDO_FIELDS.has(field) && !(field in def.properties)) {
+          throw new SchemaError(
+            `view '${name}' projects undeclared property '${field}' of node type '${type}'`,
+            `${at}.fields.${type}[${i}]`,
+          );
+        }
+      }
+    }
+
+    for (const [key, where] of [
+      ["select.roots.where", view.select?.roots?.where],
+      ["select.traverse.where", view.select?.traverse?.where],
+    ] as const) {
+      if (where !== undefined) {
+        parseExpression(where, `${at}.${key}`);
+      }
+    }
+  }
+}
+
+/**
  * Validates consistency of a WorkspaceType against its embedded schema.
  */
 export function validateWorkspaceType(wsType: WorkspaceType): void {
-  const { schema, template, lifecycle, tools } = wsType;
+  const { schema, template, lifecycle, tools, views } = wsType;
 
   if (template) {
     assertTemplate(schema, template);
+  }
+
+  if (views) {
+    assertViews(schema, views, tools?.named);
   }
 
   if (lifecycle) {
@@ -139,6 +246,14 @@ export function validateWorkspaceType(wsType: WorkspaceType): void {
         );
       }
       seen.add(agent.role);
+      for (const [j, view] of (agent.views ?? []).entries()) {
+        if (view !== ALL_TOOLS && !(views && view in views)) {
+          throw new SchemaError(
+            `agent '${agent.role}' grants undeclared view '${view}'`,
+            `tools.agents[${i}].views[${j}]`,
+          );
+        }
+      }
       for (const key of ["readOnly", "hidden"] as const) {
         const list = agent.nodes?.[key] ?? [];
         for (let j = 0; j < list.length; j++) {
@@ -315,6 +430,7 @@ export function parseWorkspaceTypeDocument(source: string, origin = "<yaml>"): W
       description: a.description,
       systemPrompt: a.systemPrompt,
       tools: a.tools,
+      views: a.views,
       nodes:
         a.nodes && (a.nodes.readOnly?.length || a.nodes.hidden?.length)
           ? { readOnly: a.nodes.readOnly, hidden: a.nodes.hidden }
@@ -323,9 +439,43 @@ export function parseWorkspaceTypeDocument(source: string, origin = "<yaml>"): W
     }));
     tools = {
       expose: raw.tools.expose,
+      advanced: raw.tools.advanced,
       named: Object.keys(named).length > 0 ? named : undefined,
       agents: agents.length > 0 ? agents : undefined,
     };
+  }
+
+  // Views are carried through as declared. Every name they mention is checked
+  // against the schema in `validateWorkspaceType`, so nothing here has to guess.
+  let views: Record<string, ViewDef> | undefined;
+  if (raw.views && Object.keys(raw.views).length > 0) {
+    views = {};
+    for (const [vName, vDef] of Object.entries(raw.views)) {
+      views[vName] = {
+        title: vDef.title,
+        description: vDef.description,
+        guidance: vDef.guidance,
+        params: vDef.params
+          ? Object.fromEntries(
+              Object.entries(vDef.params).map(([pName, pDef]) => [
+                pName,
+                {
+                  type: pDef.type,
+                  required: pDef.required,
+                  default: pDef.default,
+                  description: pDef.description,
+                  of: pDef.of,
+                } satisfies ParamDef,
+              ]),
+            )
+          : undefined,
+        select: vDef.select,
+        fields: vDef.fields,
+        edges: vDef.edges,
+        maxNodes: vDef.maxNodes,
+        format: vDef.format,
+      };
+    }
   }
 
   const projection: ProjectionMode = raw.projection ?? "none";
@@ -343,6 +493,7 @@ export function parseWorkspaceTypeDocument(source: string, origin = "<yaml>"): W
     template,
     lifecycle,
     tools,
+    views,
     projection,
     retention,
   };

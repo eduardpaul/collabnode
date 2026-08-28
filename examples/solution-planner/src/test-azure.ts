@@ -51,7 +51,7 @@ async function testLangChain() {
 
     const foundryModel = new ChatOpenAI({
       apiKey: key,
-      modelName: deployment,
+      model: deployment,
       configuration: {
         baseURL: `${azureEndpoint}/models`,
         defaultHeaders: { "api-key": key },

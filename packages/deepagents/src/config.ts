@@ -59,6 +59,7 @@ export function getDeepAgentConfig(options: DeepAgentConfigOptions): CollabDeepA
     session,
     schema,
     toolsPolicy: workspaceType?.tools,
+    views: workspaceType?.views,
     agentDef,
     actorId,
     language,
@@ -130,6 +131,9 @@ export function createSubAgentConfig(options: SubAgentConfigOptions): CollabSubA
   const tools = bindAgentTools({
     session,
     schema,
+    // Without the workspace policy a subagent bypasses `tools.expose` and the
+    // per-role `nodes.readOnly` list that the parent agent is held to.
+    toolsPolicy: workspaceType?.tools,
     agentDef,
     actorId,
     language,

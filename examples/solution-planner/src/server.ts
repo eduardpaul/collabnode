@@ -13,6 +13,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer as createViteServer } from "vite";
+import { collabnodeTypes } from "collabnode/vite";
 import { config as loadDotEnv } from "dotenv";
 import {
   startPlannerWorkflow,
@@ -22,6 +23,10 @@ import {
   getPlannerState,
 } from "./agent/graph.ts";
 import { dirtyNodes } from "./agent/dirty.ts";
+import { singletonOfType } from "collabnode";
+import type { PlannerSession } from "./agent/session.ts";
+import type { SolutionPlanner } from "./workspace.types.ts";
+import type { CollabSession } from "@collabnode/runtime";
 import { detectLanguage } from "./agent/llm.ts";
 
 loadDotEnv();
@@ -63,6 +68,14 @@ if (redisClient) {
 }
 
 // Hub instance
+/**
+ * The hub serves any workspace type, so the session it hands back is untyped.
+ * This is the one place this app's own schema goes back on.
+ */
+function planner(ws: { session: CollabSession }): PlannerSession {
+  return ws.session.as<SolutionPlanner>();
+}
+
 const hub = await createHub({
   collab: collabBackend,
   registry,
@@ -95,6 +108,17 @@ const http = createServer((req, res) => {
 const vite = await createViteServer({
   root,
   appType: "spa",
+  // Save `solution-planner.yaml` and `src/workspace.types.ts` is rewritten
+  // before you have switched windows. Nothing to run by hand: the editor's
+  // TypeScript server picks the file up from disk, so a renamed property or a
+  // narrowed enum goes red across the app on save.
+  plugins: [
+    collabnodeTypes({
+      input: join(root, "workspaces/solution-planner.yaml"),
+      output: join(root, "src/workspace.types.ts"),
+      name: "SolutionPlanner",
+    }),
+  ],
   server: {
     middlewareMode: true,
     hmr: { server: http },
@@ -148,6 +172,7 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
         iteration: state?.iteration ?? 0,
         managerAgrees: state?.managerAgrees ?? false,
         architectAgrees: state?.architectAgrees ?? false,
+        ...plannerStateFromGraph(rec.id),
       };
     });
     json(res, list);
@@ -199,10 +224,13 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
     const ws = await hub.open("solution-planner", { id: wsId, actorId: "server" });
 
     json(res, {
-      documentId: ws.session.id,
+      documentId: planner(ws).id,
       workspaceId: ws.id,
       typeName: ws.type.name,
       schema: ws.type.schema,
+      // The workspace type's named slices, so the browser renders the same views
+      // the agents call as `view_<name>` tools rather than re-deriving its own.
+      views: ws.type.views,
       collab: collabJoin,
     });
     return true;
@@ -224,7 +252,7 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
     }
 
     const ws = await hub.open("solution-planner", { id: wsId, actorId: "server" });
-    const result = await startPlannerWorkflow(wsId, ws.session, description, language);
+    const result = await startPlannerWorkflow(wsId, planner(ws), description, language);
     json(res, result);
     return true;
   }
@@ -242,7 +270,7 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
     }
 
     const ws = await hub.open("solution-planner", { id: wsId, actorId: "server" });
-    const result = await resumePlannerWithValidation(wsId, ws.session, {
+    const result = await resumePlannerWithValidation(wsId, planner(ws), {
       assumptionId,
       approved,
       comment,
@@ -255,7 +283,7 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
     const payload = parseJson(await readBody(req));
     const wsId = typeof payload?.workspaceId === "string" ? payload.workspaceId : defaultWorkspaceId;
     const ws = await hub.open("solution-planner", { id: wsId, actorId: "server" });
-    const dirty = dirtyNodes(ws.session.snapshot());
+    const dirty = dirtyNodes(planner(ws).snapshot());
     if (dirty.length === 0) {
       fail(res, 400, "no dirty nodes to revise");
       return true;
@@ -263,7 +291,7 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
 
     const reviewMessage =
       typeof payload?.reviewMessage === "string" ? payload.reviewMessage.trim() : "";
-    const result = await startRevisionWorkflow(wsId, ws.session, reviewMessage || undefined);
+    const result = await startRevisionWorkflow(wsId, planner(ws), reviewMessage || undefined);
     json(res, result);
     return true;
   }
@@ -274,7 +302,7 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
     const actor = payload?.actor === "architect" ? "architect" : "manager";
 
     const ws = await hub.open("solution-planner", { id: wsId, actorId: "server" });
-    const result = await runSingleAgentStep(wsId, ws.session, actor);
+    const result = await runSingleAgentStep(wsId, planner(ws), actor);
     json(res, result);
     return true;
   }
@@ -284,21 +312,21 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
     const wsId = typeof payload?.workspaceId === "string" ? payload.workspaceId : defaultWorkspaceId;
 
     const ws = await hub.open("solution-planner", { id: wsId, actorId: "server" });
-    const snap = ws.session.snapshot();
+    const snap = planner(ws).snapshot();
 
     // Delete edges first, then nodes (except SolutionState which is reset)
     for (const edge of snap.edges) {
-      await ws.session.deleteEdge(edge.id);
+      await planner(ws).deleteEdge(edge.id);
     }
     for (const node of snap.nodes) {
       if (node.type !== "SolutionState") {
-        await ws.session.deleteNode(node.id);
+        await planner(ws).deleteNode(node.id);
       }
     }
 
     // `SolutionState` is a singleton in the workspace YAML, so this lands on
     // the node that is already there rather than adding a second one.
-    await ws.session.upsertNode({
+    await planner(ws).upsertNode({
       type: "SolutionState",
       properties: {
         appName: "Solution Planner Demo",
@@ -319,12 +347,40 @@ async function apiRoutes(path: string, req: IncomingMessage, res: ServerResponse
   if (path === "/api/planner/status" && method === "GET") {
     const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
     const wsId = url.searchParams.get("workspace")?.trim() || defaultWorkspaceId;
-    const state = getPlannerState(wsId);
-    json(res, state ?? { status: "idle", logs: [] });
+    // Logs only exist on the run; everything else is read back off the graph.
+    json(res, { ...(getPlannerState(wsId) ?? { status: "idle", logs: [] }), ...plannerStateFromGraph(wsId) });
     return true;
   }
 
   return false;
+}
+
+/**
+ * Consensus state as the graph holds it.
+ *
+ * The LangGraph run state only knows what the *agents* last decided. A human
+ * editing a node in the browser breaks consensus by writing to the CRDT, and
+ * the run never hears about it — so reading agreement from the run reports a
+ * plan as approved while the board shows dirty nodes and two agents mid-review.
+ * The SolutionState node is the one that both sides actually write to.
+ *
+ * Returns nothing for a workspace that is not open: there is no graph to read.
+ */
+function plannerStateFromGraph(wsId: string): Record<string, unknown> | undefined {
+  const live = hub.getLiveWorkspace(wsId);
+  const snapshot = live?.session.as<SolutionPlanner>().snapshot();
+  const props = snapshot && singletonOfType(snapshot, "SolutionState")?.properties;
+  if (!props) {
+    return undefined;
+  }
+  return {
+    status: props.status ?? "idle",
+    managerAgrees: props.managerAgrees === true,
+    architectAgrees: props.architectAgrees === true,
+    iteration: Number(props.iteration ?? 0),
+    activeAssumptionId: props.pendingAssumptionId ?? undefined,
+    activeAgent: props.activeAgent ?? "none",
+  };
 }
 
 function parseJson(body: Buffer): Record<string, unknown> | undefined {

@@ -1,20 +1,47 @@
-import type { CollabSession } from "@collabnode/runtime";
 import { snapshotToMarkdown } from "collabnode";
+import { findOfType, nodesOfType, ofType, type PlannerSession } from "./session.ts";
 import type { PlannerState, AgentLog } from "./types.ts";
-import { getChatModel, invokeStructured } from "./llm.ts";
+import { getChatModel } from "./llm.ts";
+import { invokeStructured, readOnlyTools } from "@collabnode/deepagents";
+import { dirtyNodes, formatRevisionContext, formatUserReviewGuidance } from "./dirty.ts";
 import {
-  applyRevisionWrites,
-  dirtyNodes,
-  formatRevisionContext,
-  formatUserReviewGuidance,
-  risksToCreates,
-  type RevisionCreate,
-  type RevisionUpdate,
-} from "./dirty.ts";
-import { managerPlanSchema, managerRevisionSchema, omitNullish } from "./schemas.ts";
+  applyPlan,
+  emptyPlan,
+  plannerPlanSchema,
+  type ApplyPlanOptions,
+  type PlannerPlan,
+} from "./plan.ts";
+
+import { getDeepAgentConfig } from "@collabnode/deepagents";
+import { getPlannerWorkspaceType } from "./workspace-def.ts";
+import { withActiveAgent } from "./activity.ts";
+
+/**
+ * Properties the Manager owns rather than the model: a Risk it raises is a
+ * business risk, and an Assumption it raises is pending on the human it is
+ * about to interrupt.
+ */
+/**
+ * Written over whatever the model said, for every node of these types.
+ *
+ * `satisfies` is what keeps these honest: `category: "buisness"` used to be a
+ * string the runtime rejected at write time; now it is not an enum member and
+ * does not compile.
+ */
+const MANAGER_STAMP = {
+  Risk: { category: "business" },
+  Assumption: { status: "pending", raisedBy: "manager" },
+} satisfies ApplyPlanOptions["stamp"];
 
 export async function runManagerStep(
-  session: CollabSession,
+  session: PlannerSession,
+  state: PlannerState,
+): Promise<Partial<PlannerState>> {
+  return withActiveAgent(session, "manager", () => runManagerTurn(session, state));
+}
+
+async function runManagerTurn(
+  session: PlannerSession,
   state: PlannerState,
 ): Promise<Partial<PlannerState>> {
   if (state.mode === "revise") {
@@ -25,6 +52,7 @@ export async function runManagerStep(
   const iteration = state.iteration + 1;
   const logs: AgentLog[] = [...state.logs];
   const model = getChatModel();
+  const workspaceType = await getPlannerWorkspaceType();
 
   const logMessage = (text: string) => {
     logs.push({
@@ -34,241 +62,96 @@ export async function runManagerStep(
     });
   };
 
+  const agentConfig = getDeepAgentConfig({
+    // Agent tools are built from the runtime schema, so this API serves any
+    // workspace and takes the untyped session.
+    session: session.as(),
+    workspaceType,
+    role: "manager",
+    language: isEs ? "es" : "en",
+    model: model ?? undefined,
+    onToolCall: (event) => {
+      logMessage(`🔧 [manager] ${event.name}: ${JSON.stringify(event.args)}`);
+    },
+  });
+
   logMessage(
     isEs
       ? `[Iteración ${iteration}] Gestor analizando requerimientos de negocio para: "${state.description}"`
       : `[Iteration ${iteration}] Manager analyzing business scope for: "${state.description}"`,
   );
 
-  let epics: Array<{ title: string; description: string; priority: "low" | "medium" | "high"; features: Array<{ title: string; description: string }> }> = [];
-  let businessRisks: Array<{ title: string; description: string; severity: "low" | "medium" | "high" | "critical"; mitigation: string }> = [];
-  let newAssumption: { title: string; description: string } | null = null;
+  let plan: PlannerPlan = emptyPlan();
 
   if (model) {
     try {
+      const schema = await plannerPlanSchema("manager", isEs ? "es" : "en");
       const prompt = isEs
-        ? `Eres un Gerente de Producto (AI Manager). Analiza esta descripción de producto y genera:
-1. 2-3 Epics de negocio con 2 Features cada uno.
-2. 1-2 Riesgos de negocio con severidad y mitigación.
-3. Si es la primera iteración (iteración ${iteration} === 1), plantea UNA suposición clave (ej. proveedor cloud, autenticación, modelo de datos) para validar con el usuario humano. Si no es la primera iteración, assumption debe ser null.
+        ? `Eres un Gerente de Producto (AI Manager). Analiza esta descripción de producto y devuelve un plan:
+1. 2-3 Epics de negocio con 2 Features cada uno, como nodos con su propio "ref".
+2. Una arista HAS_FEATURE por cada Feature, de la Épica a la que pertenece.
+3. 1-2 Riesgos de negocio, cada uno con una arista HAS_RISK desde la Épica o Feature que amenaza.
+4. Si es la primera iteración (iteración ${iteration} === 1), UNA suposición crítica (ej. proveedor cloud, autenticación, modelo de datos) para validar con el usuario humano, con una arista HAS_ASSUMPTION desde la Épica de la que depende. Si no es la primera iteración, no incluyas ninguna suposición.
 
 Descripción: "${state.description}"`
-        : `You are an AI Product Manager. Analyze this product description and produce:
-1. 2-3 Business Epics with 2 Features each.
-2. 1-2 Business Risks with severity and mitigation.
-3. If iteration ${iteration} === 1, raise ONE critical assumption (e.g. cloud provider, auth provider, storage tier) for human validation. Otherwise assumption must be null.
+        : `You are an AI Product Manager. Analyze this product description and return a plan:
+1. 2-3 Business Epics with 2 Features each, as nodes with their own "ref".
+2. One HAS_FEATURE edge per Feature, from the Epic it belongs to.
+3. 1-2 Business Risks, each with a HAS_RISK edge from the Epic or Feature it threatens.
+4. If iteration ${iteration} === 1, ONE critical assumption (e.g. cloud provider, auth provider, storage tier) for human validation, with a HAS_ASSUMPTION edge from the Epic it is load-bearing for. Otherwise raise no assumption.
 
 Description: "${state.description}"`;
 
-      const parsed = await invokeStructured(model, managerPlanSchema, prompt, "manager_plan");
-      epics = parsed.epics;
-      businessRisks = parsed.businessRisks;
-      if (iteration === 1) {
-        newAssumption = parsed.assumption ?? {
-          title: isEs ? "Asumir Infraestructura Cloud Híbrida" : "Assume Cloud & Security Tier",
-          description: isEs
-            ? "¿Aceptas asumir despliegue en nube con autenticación OIDC y cifrado en tránsito?"
-            : "Do you approve assuming cloud deployment with OIDC authentication and transit encryption?",
-        };
+      const parsed = await invokeStructured(model, schema, prompt, "manager_plan", {
+        system: agentConfig.systemPrompt,
+        // Read-only while composing: the plan is written once by applyPlan.
+        tools: readOnlyTools(agentConfig.tools),
+        maxToolRounds: 2,
+        onToolEvent: (event) => logMessage(`🔧 [manager] ${event.name}`),
+      });
+      plan = parsed;
+      if (iteration !== 1) {
+        plan = withoutAssumptions(plan);
+      }
+      if (plan.review?.trim()) {
+        logMessage(plan.review.trim());
       }
     } catch (err) {
-      console.warn("LLM manager structured output error, falling back to deterministic:", err);
-      epics = [];
+      console.warn("LLM manager structured output error, writing nothing:", err);
+      logMessage(
+        isEs
+          ? "⚠️ El gestor no pudo generar un plan; no se escribió nada en el grafo."
+          : "⚠️ Manager could not produce a plan; nothing was written to the graph.",
+      );
+      plan = emptyPlan();
     }
   }
 
-  // Deterministic fallback if model was not configured or errored
-  if (epics.length === 0) {
-    if (isEs) {
-      epics = [
-        {
-          title: "Colaboración en Tiempo Real",
-          description: "Infraestructura y sincronización para edición multi-usuario sin conflictos.",
-          priority: "high",
-          features: [
-            {
-              title: "Sincronización de Estado CRDT",
-              description: "Propagación bidireccional y resolución determinista de conflictos en memoria y red.",
-            },
-            {
-              title: "Presencia y Concurrencia de Usuarios",
-              description: "Detección de pares activos, avatares y cursores en vivo.",
-            },
-          ],
-        },
-        {
-          title: "Gestión y Persistencia de la Solución",
-          description: "Estructura de datos para modelar épicas, tareas y grafos de decisión.",
-          priority: "medium",
-          features: [
-            {
-              title: "Exportación y Proyección de Grafos",
-              description: "Visualización interactiva y consulta semántica de dependencias.",
-            },
-            {
-              title: "Registro de Historial y Auditoría",
-              description: "Trazabilidad de cambios por usuario y agente en cada iteración.",
-            },
-          ],
-        },
-      ];
-
-      businessRisks = [
-        {
-          title: "Sobrecarga de Red por Alta Concurrencia",
-          description: "Múltiples agentes y usuarios editando simultáneamente pueden saturar el canal de eventos.",
-          severity: "medium",
-          mitigation: "Agrupar mutaciones en lotes y utilizar debouncing en la proyección de almacenamiento.",
-        },
-      ];
-
-      if (iteration === 1) {
-        newAssumption = {
-          title: "Asumir Infraestructura Redis + Fluid Relay",
-          description: "¿Podemos asumir el uso de Redis para registro distribuido y Fluid Framework para la sincronización de sesión?",
-        };
-      }
-    } else {
-      epics = [
-        {
-          title: "Real-Time Multi-Peer Collaboration",
-          description: "Core collaborative engine for conflict-free distributed editing between humans and agents.",
-          priority: "high",
-          features: [
-            {
-              title: "CRDT State Synchronization",
-              description: "Bidirectional mutation propagation and deterministic merging over WebSockets.",
-            },
-            {
-              title: "Peer Awareness & Live Presence",
-              description: "Tracking connected actors, typing indicators, and active session leases.",
-            },
-          ],
-        },
-        {
-          title: "Solution Graph Persistence & Projection",
-          description: "Declarative graph schema storing business epics, architecture nodes, and tasks.",
-          priority: "medium",
-          features: [
-            {
-              title: "Interactive Graph Visualization",
-              description: "Live visual projection of solution components and cross-entity relationships.",
-            },
-            {
-              title: "Audit Trail & Change Tracking",
-              description: "Fine-grained provenance and history records for all agent and user operations.",
-            },
-          ],
-        },
-      ];
-
-      businessRisks = [
-        {
-          title: "Network Saturation Under High Agent Concurrency",
-          description: "Rapid cyclical mutations from multiple agents could degrade browser responsiveness.",
-          severity: "medium",
-          mitigation: "Apply batch operations (applyOps) and debounce projection updates.",
-        },
-      ];
-
-      if (iteration === 1) {
-        newAssumption = {
-          title: "Assume Redis Registry and Fluid Relay Backbone",
-          description: "Should we assume Redis for cross-replica workspace registry and Fluid Framework for CRDT session relay?",
-        };
-      }
-    }
-  }
-
-  // Mutate collabnode session atomically via session.batch()
-  await session.batch(
-    (b) => {
-      let epicIndex = 0;
-      for (const epic of epics) {
-        const epicRef = `epic-${epicIndex++}`;
-        b.upsertNode(
-          {
-            type: "Epic",
-            properties: {
-              title: epic.title,
-              description: epic.description,
-              priority: epic.priority,
-              dirty: false,
-            },
-          },
-          epicRef,
-        );
-
-        let featIndex = 0;
-        for (const feat of epic.features) {
-          const featRef = `${epicRef}-feat-${featIndex++}`;
-          b.upsertNode(
-            {
-              type: "Feature",
-              properties: {
-                title: feat.title,
-                description: feat.description,
-                epicTitle: epic.title,
-                dirty: false,
-              },
-            },
-            featRef,
-          );
-
-          b.upsertEdge({
-            type: "HAS_FEATURE",
-            from: { ref: epicRef },
-            to: { ref: featRef },
-          });
-        }
-      }
-
-      for (const risk of businessRisks) {
-        b.upsertNode({
-          type: "Risk",
-          properties: {
-            title: risk.title,
-            description: risk.description,
-            severity: risk.severity,
-            category: "business",
-            mitigation: risk.mitigation,
-            dirty: false,
-          },
-        });
-      }
-    },
-    { actorId: "ai-manager" },
-  );
-
-  // If a new assumption is flagged, raise it and trigger Human-In-The-Loop pause
-  let activeAssumptionId = state.activeAssumptionId;
-  let status: PlannerState["status"] = "planning";
-
-  if (newAssumption && !state.activeAssumptionId) {
-    const assumptionId = await session.upsertNode(
-      {
-        type: "Assumption",
-        properties: {
-          title: newAssumption.title,
-          description: newAssumption.description,
-          status: "pending",
-          raisedBy: "manager",
-          dirty: false,
-        },
-      },
-      { actorId: "ai-manager" },
+  const written = await applyPlan(session, plan, {
+    actorId: "ai-manager",
+    language: isEs ? "es" : "en",
+    stamp: MANAGER_STAMP,
+  });
+  for (const dropped of written.droppedEdges) {
+    logMessage(
+      isEs ? `⚠️ Relación descartada (extremo desconocido): ${dropped}` : `⚠️ Dropped relationship (unknown endpoint): ${dropped}`,
     );
+  }
 
-    activeAssumptionId = assumptionId;
-    status = "waiting_user_validation";
+  // An Assumption in the plan is what pauses the workflow. Its id comes back
+  // from the batch that wrote it — the plan's own `ref` is the only handle
+  // that survives from composing the plan to acting on it.
+  const assumption = findOfType(plan.nodes, "Assumption");
+  const assumptionId = assumption ? written.idsByRef[assumption.ref] : undefined;
 
+  if (assumptionId && !state.activeAssumptionId) {
+    const title = String(assumption?.properties.title ?? "");
     logMessage(
       isEs
-        ? `⚠️ [Suposición Crítica] "${newAssumption.title}". Pausando el flujo para validación humana.`
-        : `⚠️ [Critical Assumption] "${newAssumption.title}". Pausing workflow for user validation.`,
+        ? `⚠️ [Suposición Crítica] "${title}". Pausando el flujo para validación humana.`
+        : `⚠️ [Critical Assumption] "${title}". Pausing workflow for user validation.`,
     );
 
-    // Update solution state in collabnode
     await session.upsertNode(
       {
         type: "SolutionState",
@@ -290,14 +173,14 @@ Description: "${state.description}"`;
     return {
       iteration,
       logs,
-      activeAssumptionId,
-      status,
+      activeAssumptionId: assumptionId,
+      status: "waiting_user_validation",
       managerAgrees: false,
     };
   }
 
-  // If assumption was resolved or we are on subsequent rounds, mark Manager agreement
-  const managerAgrees = iteration >= 2 || !newAssumption;
+  // If the assumption was resolved, or we are on a later round, the Manager agrees.
+  const managerAgrees = iteration >= 2 || !assumptionId;
 
   if (managerAgrees) {
     logMessage(
@@ -318,7 +201,7 @@ Description: "${state.description}"`;
         managerAgrees,
         architectAgrees: state.architectAgrees,
         iteration,
-        pendingAssumptionId: undefined,
+        pendingAssumptionId: null,
         mode: state.mode ?? "initial",
       },
     },
@@ -333,8 +216,21 @@ Description: "${state.description}"`;
   };
 }
 
+/** Later rounds do not re-raise an assumption: one pause per plan is the deal. */
+function withoutAssumptions(plan: PlannerPlan): PlannerPlan {
+  const dropped = new Set(
+    ofType(plan.nodes, "Assumption").map((node) => node.ref),
+  );
+  if (dropped.size === 0) return plan;
+  return {
+    ...plan,
+    nodes: plan.nodes.filter((node) => !dropped.has(node.ref)),
+    edges: plan.edges.filter((edge) => !dropped.has(edge.from) && !dropped.has(edge.to)),
+  };
+}
+
 async function runManagerRevise(
-  session: CollabSession,
+  session: PlannerSession,
   state: PlannerState,
 ): Promise<Partial<PlannerState>> {
   const isEs = state.language === "es";
@@ -345,7 +241,7 @@ async function runManagerRevise(
   const dirty = dirtyNodes(snapshot);
   const revisionMarkdown = formatRevisionContext(snapshot);
   const graphMarkdown = snapshotToMarkdown(snapshot, {
-    types: ["Epic", "Feature", "Assumption", "Risk", "Task", "C4Model"],
+    types: ["Epic", "Feature", "Assumption", "Risk", "Task", "C4DiagramElement"],
   });
 
   const logMessage = (text: string) => {
@@ -362,14 +258,26 @@ async function runManagerRevise(
       : `[Iteration ${iteration}] Manager reviewing ${dirty.length} dirty node(s) and their relationships.`,
   );
 
-  let updates: RevisionUpdate[] = [];
-  let creates: RevisionCreate[] = [];
-  let newAssumption: { title: string; description: string } | null = null;
+  let plan: PlannerPlan | undefined;
   let managerAgrees = true;
-  let usedModel = false;
+
+  const workspaceType = await getPlannerWorkspaceType();
+  const agentConfig = getDeepAgentConfig({
+    // Agent tools are built from the runtime schema, so this API serves any
+    // workspace and takes the untyped session.
+    session: session.as(),
+    workspaceType,
+    role: "manager",
+    language: isEs ? "es" : "en",
+    model: model ?? undefined,
+    onToolCall: (event) => {
+      logMessage(`🔧 [manager] ${event.name}: ${JSON.stringify(event.args)}`);
+    },
+  });
 
   if (model) {
     try {
+      const schema = await plannerPlanSchema("manager", isEs ? "es" : "en");
       const prompt = isEs
         ? `Eres un Gerente de Producto (AI Manager). El usuario cambió nodos del plan. Revisa SOLO los nodos sucios y sus relaciones; adapta el alcance de negocio, no regeneres el plan completo.
 
@@ -379,10 +287,12 @@ ${graphMarkdown}
 ${revisionMarkdown}
 
 Reglas:
-- Actualiza nodos existentes por id.
-- Crea Features/Riesgos solo si el cambio lo exige.
+- Para cambiar un nodo existente, inclúyelo en "nodes" con su "id" del grafo de arriba.
+- Para crear uno nuevo, inclúyelo en "nodes" sin "id" y dale un "ref".
+- Toda estructura va en "edges": un Feature sin arista HAS_FEATURE no está en el plan. Los extremos son ids del grafo o refs de este mismo plan, nunca títulos.
+- Para reparentar algo que ya existe, pon el id de la arista vieja en "removeEdges" y añade la nueva en "edges".
 - Plantea UNA suposición solo si el cambio es crítico y aún no hay una pendiente.
-- dirty debe quedar limpio en tus escrituras (el runtime lo fuerza).${formatUserReviewGuidance(state.reviewMessage, true)}`
+- agrees: true si el alcance revisado te parece completo.${formatUserReviewGuidance(state.reviewMessage, true)}`
         : `You are an AI Product Manager. The user changed nodes in the plan. Review ONLY the dirty nodes and their relationships; adapt business scope — do not regenerate the whole plan.
 
 Current graph:
@@ -391,62 +301,55 @@ ${graphMarkdown}
 ${revisionMarkdown}
 
 Rules:
-- Update existing nodes by id.
-- Create Features/Risks only when the change requires it.
+- To change an existing node, include it in "nodes" with its "id" from the graph above.
+- To create a new one, include it in "nodes" with no "id" and give it a "ref".
+- All structure lives in "edges": a Feature with no HAS_FEATURE edge is not in the plan. Endpoints are graph ids or refs from this same plan — never titles.
+- To re-parent something that already exists, put the old edge's id in "removeEdges" and add the new one to "edges".
 - Raise ONE assumption only if the change is load-bearing and none is already pending.
-- Your writes are stamped clean (not dirty).${formatUserReviewGuidance(state.reviewMessage, false)}`;
+- agrees: true when the revised scope looks complete to you.${formatUserReviewGuidance(state.reviewMessage, false)}`;
 
-      const parsed = await invokeStructured(model, managerRevisionSchema, prompt, "manager_revision");
-      if (parsed.review.trim()) {
-        logMessage(parsed.review.trim());
+      const parsed = await invokeStructured(model, schema, prompt, "manager_revision", {
+        system: agentConfig.systemPrompt,
+        // Read-only while composing: applyPlan is the single write.
+        tools: readOnlyTools(agentConfig.tools),
+        maxToolRounds: 2,
+        onToolEvent: (event) => logMessage(`🔧 [manager] ${event.name}`),
+      });
+      plan = parsed;
+      if (plan.review?.trim()) {
+        logMessage(plan.review.trim());
       }
-      updates = parsed.updates.map((update) => ({
-        id: update.id,
-        properties: omitNullish(update.properties),
-      }));
-      creates = [
-        ...parsed.creates.map((create) => ({
-          type: create.type,
-          properties: omitNullish(create.properties),
-          link: create.link ?? undefined,
-        })),
-        ...risksToCreates(parsed.risks),
-      ];
-      if (parsed.assumption?.title.trim()) {
-        newAssumption = {
-          title: parsed.assumption.title.trim(),
-          description: parsed.assumption.description.trim(),
-        };
-      }
-      managerAgrees = parsed.agrees;
-      usedModel = true;
+      managerAgrees = plan.agrees;
     } catch (err) {
       console.warn("LLM manager revise structured output error, falling back to deterministic:", err);
+      plan = undefined;
     }
   }
 
-  if (!usedModel) {
-    const dirtyEpic = snapshot.nodes.find((n) => n.type === "Epic" && n.properties.dirty === true);
+  if (!plan) {
+    plan = emptyPlan();
+    const dirtyEpic = nodesOfType(snapshot, "Epic").find((n) => n.properties.dirty === true);
     if (dirtyEpic) {
       const note = state.reviewMessage?.trim();
       const baseDescription = isEs
         ? `El usuario modificó "${String(dirtyEpic.properties.title)}". Hay que revalidar Features, tareas y riesgos asociados.`
         : `The user changed "${String(dirtyEpic.properties.title)}". Linked features, tasks, and risks need revalidation.`;
-      creates.push({
+      plan.nodes.push({
         type: "Risk",
+        ref: "revision-risk",
         properties: {
           title: isEs ? "Cambio de alcance pendiente de alinear" : "Scope change needs alignment",
           description: note
             ? `${baseDescription} ${isEs ? "Nota del usuario:" : "User note:"} ${note}`
             : baseDescription,
           severity: "medium",
-          category: "business",
           mitigation: isEs
             ? "Revisar descendientes del Epic y ajustar el plan antes de implementar."
             : "Review the Epic's descendants and adjust the plan before implementation.",
         },
-        link: { type: "HAS_RISK", from: dirtyEpic.id },
       });
+      // The Epic is already in the graph, so the edge names it by id.
+      plan.edges.push({ type: "HAS_RISK", from: dirtyEpic.id, to: "revision-risk" });
       logMessage(
         isEs
           ? `Adaptando el alcance de "${String(dirtyEpic.properties.title)}" y registrando un riesgo de negocio.`
@@ -461,34 +364,25 @@ Rules:
     }
   }
 
-  await applyRevisionWrites(session, { updates, creates }, "ai-manager");
-
-  let activeAssumptionId = state.activeAssumptionId;
-  let status: PlannerState["status"] = "planning";
-
-  if (newAssumption && !state.activeAssumptionId) {
-    const assumptionId = await session.upsertNode(
-      {
-        type: "Assumption",
-        properties: {
-          title: newAssumption.title,
-          description: newAssumption.description,
-          status: "pending",
-          raisedBy: "manager",
-          dirty: false,
-        },
-      },
-      { actorId: "ai-manager" },
+  const written = await applyPlan(session, plan, {
+    actorId: "ai-manager",
+    language: isEs ? "es" : "en",
+    stamp: MANAGER_STAMP,
+  });
+  for (const dropped of written.droppedEdges) {
+    logMessage(
+      isEs ? `⚠️ Relación descartada (extremo desconocido): ${dropped}` : `⚠️ Dropped relationship (unknown endpoint): ${dropped}`,
     );
+  }
 
-    activeAssumptionId = assumptionId;
-    status = "waiting_user_validation";
-    managerAgrees = false;
+  const assumption = findOfType(plan.nodes, "Assumption", (node) => !node.id);
+  const assumptionId = assumption ? written.idsByRef[assumption.ref] : undefined;
 
+  if (assumptionId && !state.activeAssumptionId) {
     logMessage(
       isEs
-        ? `⚠️ [Suposición Crítica] "${newAssumption.title}". Pausando el flujo para validación humana.`
-        : `⚠️ [Critical Assumption] "${newAssumption.title}". Pausing workflow for user validation.`,
+        ? `⚠️ [Suposición Crítica] "${String(assumption?.properties.title ?? "")}". Pausando el flujo para validación humana.`
+        : `⚠️ [Critical Assumption] "${String(assumption?.properties.title ?? "")}". Pausing workflow for user validation.`,
     );
 
     await session.upsertNode(
@@ -512,20 +406,20 @@ Rules:
     return {
       iteration,
       logs,
-      activeAssumptionId,
-      status,
+      activeAssumptionId: assumptionId,
+      status: "waiting_user_validation",
       managerAgrees: false,
       mode: "revise",
     };
   }
 
-  if (managerAgrees) {
-    logMessage(
-      isEs
-        ? "✅ Gestor aprueba el alcance de negocio revisado."
-        : "✅ Manager approves the revised business scope.",
-    );
-  }
+  const verdict = {
+    agreed: isEs ? "✅ Gestor aprueba el alcance revisado." : "✅ Manager approves the revised scope.",
+    open: isEs
+      ? "El Gestor aún ve trabajo pendiente en el alcance."
+      : "Manager still sees open work in the scope.",
+  };
+  logMessage(managerAgrees ? verdict.agreed : verdict.open);
 
   await session.upsertNode(
     {
@@ -538,7 +432,7 @@ Rules:
         managerAgrees,
         architectAgrees: state.architectAgrees,
         iteration,
-        pendingAssumptionId: undefined,
+        pendingAssumptionId: null,
         mode: "revise",
       },
     },

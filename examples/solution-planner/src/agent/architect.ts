@@ -1,20 +1,97 @@
-import type { CollabSession } from "@collabnode/runtime";
+import { edgesOfType, nodesOfType, ofType, type PlannerSession } from "./session.ts";
 import { snapshotToMarkdown } from "collabnode";
 import type { PlannerState, AgentLog } from "./types.ts";
-import { getChatModel, invokeStructured } from "./llm.ts";
+import { getChatModel } from "./llm.ts";
+import { invokeStructured, readOnlyTools, type ToolEvent } from "@collabnode/deepagents";
+import { sharedMicrosoftLearnTools } from "./microsoft-learn.ts";
+import { dirtyNodes, formatRevisionContext, formatUserReviewGuidance } from "./dirty.ts";
+import { formatTaskDescription } from "./schemas.ts";
 import {
-  applyRevisionWrites,
-  dirtyNodes,
-  formatRevisionContext,
-  formatUserReviewGuidance,
-  risksToCreates,
-  type RevisionCreate,
-  type RevisionUpdate,
-} from "./dirty.ts";
-import { architectPlanSchema, architectRevisionSchema, omitNullish } from "./schemas.ts";
+  applyPlan,
+  emptyPlan,
+  plannerPlanSchema,
+  type ApplyPlanOptions,
+  type PlannerPlan,
+} from "./plan.ts";
+import type { z } from "zod";
+
+import { getDeepAgentConfig } from "@collabnode/deepagents";
+import { getPlannerWorkspaceType } from "./workspace-def.ts";
+import { missingC4Levels, splitCombinedC4PlanNodes } from "./c4.ts";
+import { withActiveAgent } from "./activity.ts";
+
+/** A technical risk is what the Architect raises; the category is not the model's call. */
+/** Written over whatever the model said. `satisfies` pins `category` to the schema's enum. */
+const ARCHITECT_STAMP = {
+  Risk: { category: "technical" },
+} satisfies ApplyPlanOptions["stamp"];
+
+function formatToolEvent(event: ToolEvent, isEs: boolean): string {
+  const args = event.args && typeof event.args === "object" ? event.args : {};
+  const hint =
+    typeof (args as { query?: unknown }).query === "string"
+      ? (args as { query: string }).query
+      : typeof (args as { url?: unknown }).url === "string"
+        ? (args as { url: string }).url
+        : JSON.stringify(args);
+  const clipped = hint.length > 120 ? `${hint.slice(0, 117)}...` : hint;
+  return `📚 Microsoft Learn (${event.name}): ${clipped}`;
+}
+
+async function invokeArchitectStructured<T extends z.ZodTypeAny>(
+  session: PlannerSession,
+  model: NonNullable<ReturnType<typeof getChatModel>>,
+  schema: T,
+  prompt: string,
+  name: string,
+  isEs: boolean,
+  logMessage: (text: string) => void,
+): Promise<z.infer<T>> {
+  const workspaceType = await getPlannerWorkspaceType();
+  const learn = await sharedMicrosoftLearnTools();
+
+  if (learn.tools.length > 0) {
+    logMessage(
+      isEs
+        ? `Conectado a ${learn.serverName || "Microsoft Learn MCP"} (${learn.tools.length} herramientas).`
+        : `Connected to ${learn.serverName || "Microsoft Learn MCP"} (${learn.tools.length} tools).`,
+    );
+  }
+
+  const agentConfig = getDeepAgentConfig({
+    // Agent tools are built from the runtime schema, so this API serves any
+    // workspace and takes the untyped session.
+    session: session.as(),
+    workspaceType,
+    role: "architect",
+    language: isEs ? "es" : "en",
+    extraTools: learn.tools,
+    systemPromptSuffix: learn.instructions,
+    model,
+    onToolCall: (event) => {
+      logMessage(`🔧 [architect] ${event.name}: ${JSON.stringify(event.args)}`);
+    },
+  });
+
+  return await invokeStructured(model, schema, prompt, name, {
+    // Read the graph and the docs while thinking; the plan itself is written
+    // once, atomically, from the structured result.
+    tools: readOnlyTools(agentConfig.tools),
+    system: agentConfig.systemPrompt,
+    maxToolRounds: 3,
+    onToolEvent: (event) => logMessage(formatToolEvent(event, isEs)),
+  });
+}
 
 export async function runArchitectStep(
-  session: CollabSession,
+  session: PlannerSession,
+  state: PlannerState,
+): Promise<Partial<PlannerState>> {
+  return withActiveAgent(session, "architect", () => runArchitectTurn(session, state));
+}
+
+async function runArchitectTurn(
+  session: PlannerSession,
   state: PlannerState,
 ): Promise<Partial<PlannerState>> {
   if (state.mode === "revise") {
@@ -36,291 +113,120 @@ export async function runArchitectStep(
 
   logMessage(
     isEs
-      ? `[Iteración ${iteration}] Arquitecto diseñando modelo C4 y descomposición de tareas con estimación de 6 ejes.`
-      : `[Iteration ${iteration}] Architect designing C4 model and 6-axis task breakdown.`,
+      ? `[Iteración ${iteration}] Arquitecto diseñando modelo C4 y descomposición de tareas (puntos + ejes).`
+      : `[Iteration ${iteration}] Architect designing C4 model and scored task breakdown.`,
   );
 
   // Read current snapshot from shared collab session
   const snapshot = session.snapshot();
-  const epics = snapshot.nodes.filter((n) => n.type === "Epic");
-  const features = snapshot.nodes.filter((n) => n.type === "Feature");
+  const features = nodesOfType(snapshot, "Feature");
 
-  let c4Models: Array<{ title: string; level: "context" | "container" | "component"; markdown: string }> = [];
-  let tasks: Array<{
-    title: string;
-    description: string;
-    featureTitle: string;
-    functionalPoints: string;
-    technicalPoints: string;
-    complexity: number;
-    uncertainty: number;
-    friction: number;
-    nfrScale: number;
-    status: "todo" | "doing" | "done";
-  }> = [];
-  let techRisks: Array<{ title: string; description: string; severity: "low" | "medium" | "high" | "critical"; mitigation: string }> = [];
-
+  // Ids, not titles: the markdown prints `id:` next to every node, and that id
+  // is what a task's HAS_TASK edge points at.
   const contextMarkdown = snapshotToMarkdown(snapshot, {
     types: ["Epic", "Feature", "Assumption", "Risk"],
   });
 
+  let plan: PlannerPlan = emptyPlan();
+
   if (model) {
     try {
+      const schema = await plannerPlanSchema("architect", isEs ? "es" : "en");
       const prompt = isEs
         ? `Eres un Arquitecto de Software (AI Architect). Analiza el alcance de la solución definido por el Gestor:
 
 ${contextMarkdown}
 
-Genera:
-1. Un modelo C4 en Markdown conciso (niveles Contexto y Contenedor).
-2. Tareas técnicas accionables para las features, estimadas estrictamente en los 6 EJES:
-   - functionalPoints: El 'Qué' (valor de negocio / flujo de usuario).
-   - technicalPoints: El 'Cómo' (infraestructura, deuda técnica, integraciones).
-   - complexity: número 0 (Trivial) a 5 (Reforma masiva).
-   - uncertainty: número 0 (Hecho 100 veces) a 5 (I+D puro).
-   - friction: número 0 (Solo) a 5 (Coordinación pesada).
-   - nfrScale: número 0 (Bajo/Interno) a 3 (Extrema escala/cumplimiento).
-3. 1-2 Riesgos técnicos con severidad y mitigación.`
+Usa las herramientas de Microsoft Learn mientras trabajas si aplica guía de Microsoft/Azure.
+
+Devuelve un plan de nodos y aristas:
+1. Modelo C4 completo, un nodo C4DiagramElement por elemento. Un diagrama de contenedores por sí solo NO es un modelo C4: incluye al menos un Person, un Boundary para el sistema que se diseña, un System (external:true) por cada sistema de terceros, y Components dentro del Container con más lógica.
+   El anidamiento es la arista CONTAINS (del contenedor al contenido) y las llamadas son la arista USES.
+2. Tareas técnicas accionables para las features de arriba. Cada Task necesita:
+   - description con "Qué:" y "Cómo:" en líneas separadas;
+   - functionalPoints y technicalPoints entre 1 y 21 (escala Fibonacci por convención), más complexity, uncertainty, friction y nfrScale;
+   - una arista HAS_TASK desde el id del Feature que implementa — una tarea sin ese enlace no está en el plan;
+   - una arista TARGETS_C4 hacia el elemento C4 que modifica, si aplica.
+3. 1-2 Riesgos técnicos, cada uno con una arista HAS_RISK desde la tarea, feature o elemento C4 que amenaza.
+
+Los extremos de las aristas son ids del grafo de arriba o refs de este mismo plan. Nunca títulos.`
         : `You are an AI Software Architect. Review the business scope and features defined for this solution:
 
 ${contextMarkdown}
 
-Produce:
-1. Minimal C4 architecture markdown (Context & Container levels).
-2. Actionable technical tasks scored on the 6-AXIS FRAMEWORK:
-   - functionalPoints: The 'What' (business value / user journey).
-   - technicalPoints: The 'How' (infrastructure, tech debt, integrations).
-   - complexity: number 0 (Trivial) to 5 (Massive overhaul).
-   - uncertainty: number 0 (Done 100x) to 5 (Pure R&D).
-   - friction: number 0 (Solo work) to 5 (Heavy cross-team coordination).
-   - nfrScale: number 0 (Low/Internal) to 3 (Extreme compliance/scale).
-3. 1-2 Technical Risks with severity and mitigation.`;
+Use Microsoft Learn tools while you work when Microsoft/Azure guidance applies.
 
-      const parsed = await invokeStructured(model, architectPlanSchema, prompt, "architect_plan");
-      c4Models = parsed.c4Models;
-      tasks = parsed.tasks;
-      techRisks = parsed.techRisks;
+Return a plan of nodes and edges:
+1. A complete C4 model, one C4DiagramElement node per element. A container diagram alone is NOT a C4 model: include at least one Person, one Boundary for the system being designed, a System (external:true) per third-party system, and Components inside the Container carrying the most logic.
+   Nesting is the CONTAINS edge (container → contained); calls are the USES edge.
+2. Actionable technical tasks for the features above. Every Task needs:
+   - a description with "What:" and "How:" on separate lines;
+   - functionalPoints and technicalPoints from 1 to 21 (Fibonacci ladder by convention), plus complexity, uncertainty, friction, and nfrScale;
+   - a HAS_TASK edge from the id of the Feature it implements — a task without that edge is not in the plan;
+   - a TARGETS_C4 edge to the C4 element it changes, where one applies.
+3. 1-2 technical risks, each with a HAS_RISK edge from the task, feature, or C4 element it threatens.
+
+Edge endpoints are ids from the graph above or refs from this same plan. Never titles.`;
+
+      plan = await invokeArchitectStructured(
+        session,
+        model,
+        schema,
+        prompt,
+        "architect_plan",
+        isEs,
+        logMessage,
+      );
+      if (plan.review?.trim()) {
+        logMessage(plan.review.trim());
+      }
     } catch (err) {
-      console.warn("LLM architect structured output error, falling back to deterministic:", err);
-      c4Models = [];
+      console.warn("LLM architect structured output error, writing nothing:", err);
+      logMessage(
+        isEs
+          ? "⚠️ El arquitecto no pudo generar un plan; no se escribió nada en el grafo."
+          : "⚠️ Architect could not produce a plan; nothing was written to the graph.",
+      );
+      plan = emptyPlan();
     }
   }
 
-  // Deterministic fallback if model was not configured or errored
-  if (c4Models.length === 0) {
-    if (isEs) {
-      c4Models = [
-        {
-          title: "Diagrama de Contenedores C4",
-          level: "container",
-          markdown: `\`\`\`mermaid
-flowchart TD
-  User([👤 Usuario / Navegador])
-  UI[⚛️ React Frontend (Vite + Web)]
-  Hub[🌐 Collabnode Hub / API Node.js]
-  Fluid[⚡ Fluid Relay / CRDT Store]
-  Redis[(🗄️ Redis Registry & Leases)]
+  plan = { ...plan, nodes: splitCombinedC4PlanNodes(plan.nodes) };
 
-  User -->|HTTPS / WSS| UI
-  UI -->|CRDT Ops| Fluid
-  UI -->|REST / MCP| Hub
-  Hub -->|Coordina leases| Redis
-  Hub -->|Proyección Grafos| Fluid
-\`\`\``,
-        },
-      ];
-
-      tasks = [
-        {
-          title: "Implementar Conexión React useCollab",
-          description: "Vincular el estado del árbol de componentes al ciclo de vida del CollabSession.",
-          featureTitle: "Sincronización de Estado CRDT",
-          functionalPoints: "Renderizado reactivo inmediato ante mutaciones remotas",
-          technicalPoints: "Subscripción via useSyncExternalStore y onChange",
-          complexity: 2,
-          uncertainty: 1,
-          friction: 1,
-          nfrScale: 1,
-          status: "todo",
-        },
-        {
-          title: "Configurar Servidor Hub con Memoria / Redis",
-          description: "Montar el punto de entrada de Collabnode Hub y endpoints REST para la UI.",
-          featureTitle: "Gestión y Persistencia de la Solución",
-          functionalPoints: "Gestión transparente de sesiones y documentos",
-          technicalPoints: "openCollab() + memoryRegistry/redisRegistry",
-          complexity: 2,
-          uncertainty: 1,
-          friction: 0,
-          nfrScale: 2,
-          status: "todo",
-        },
-        {
-          title: "Construir Loop Cíclico en LangGraph con Interrupciones",
-          description: "Orquestar el intercambio entre AI Manager y AI Architect con pausa para validación de suposiciones.",
-          featureTitle: "Registro de Historial y Auditoría",
-          functionalPoints: "Co-creación guiada de soluciones con control humano",
-          technicalPoints: "StateGraph con MemorySaver y validación condicional",
-          complexity: 3,
-          uncertainty: 2,
-          friction: 1,
-          nfrScale: 1,
-          status: "todo",
-        },
-      ];
-
-      techRisks = [
-        {
-          title: "Latencia de Replicación de Estado en Red Débil",
-          description: "La sincronización de grafos complejos puede experimentar demoras temporales de convergencia.",
-          severity: "low",
-          mitigation: "Aprovechar la resolución LWW y la proyección desacoplada de Collabnode.",
-        },
-      ];
-    } else {
-      c4Models = [
-        {
-          title: "C4 Container Diagram",
-          level: "container",
-          markdown: `\`\`\`mermaid
-flowchart TD
-  User([👤 User / Browser])
-  UI[⚛️ React Frontend (Vite + Web)]
-  Hub[🌐 Collabnode Hub / Node.js API]
-  Fluid[⚡ Fluid Relay / CRDT Backbone]
-  Redis[(🗄️ Redis Registry & Leases)]
-
-  User -->|HTTPS / WSS| UI
-  UI -->|CRDT Ops| Fluid
-  UI -->|REST / MCP| Hub
-  Hub -->|Coordinate Leases| Redis
-  Hub -->|Project Graph| Fluid
-\`\`\``,
-        },
-      ];
-
-      tasks = [
-        {
-          title: "Implement useCollab React Hook Binding",
-          description: "Bind React component tree reactively to the CollabSession lifecycle.",
-          featureTitle: "CRDT State Synchronization",
-          functionalPoints: "Instant UI updates upon receiving remote peer mutations",
-          technicalPoints: "Integration via useSyncExternalStore and session.onChange",
-          complexity: 2,
-          uncertainty: 1,
-          friction: 1,
-          nfrScale: 1,
-          status: "todo",
-        },
-        {
-          title: "Configure Hub Server with Fluid & Redis",
-          description: "Set up Collabnode Hub backend with API routes and workspace definitions.",
-          featureTitle: "Solution Graph Persistence & Projection",
-          functionalPoints: "Unified document joining and idempotent session creation",
-          technicalPoints: "openCollab() + memoryRegistry/redisRegistry",
-          complexity: 2,
-          uncertainty: 1,
-          friction: 0,
-          nfrScale: 2,
-          status: "todo",
-        },
-        {
-          title: "Build Cyclic LangGraph Multi-Agent Workflow",
-          description: "Orchestrate Manager and Architect turns with human-in-the-loop assumption pauses.",
-          featureTitle: "Audit Trail & Change Tracking",
-          functionalPoints: "Autonomous co-planning with guaranteed user oversight",
-          technicalPoints: "StateGraph with checkpointing and interrupt edges",
-          complexity: 3,
-          uncertainty: 2,
-          friction: 1,
-          nfrScale: 1,
-          status: "todo",
-        },
-      ];
-
-      techRisks = [
-        {
-          title: "State Replication Lag on Constrained Networks",
-          description: "Large graph operations might take several hundred milliseconds to converge.",
-          severity: "low",
-          mitigation: "Leverage Collabnode's debounced projection and LWW conflict resolution.",
-        },
-      ];
-    }
-  }
-
-  // Mutate collabnode session atomically via session.batch()
-  await session.batch(
-    (b) => {
-      for (const c4 of c4Models) {
-        b.upsertNode({
-          type: "C4Model",
-          properties: {
-            title: c4.title,
-            level: c4.level,
-            markdown: c4.markdown,
-            dirty: false,
-          },
-        });
-      }
-
-      let taskIndex = 0;
-      for (const task of tasks) {
-        const taskRef = `task-${taskIndex++}`;
-        b.upsertNode(
-          {
-            type: "Task",
-            properties: {
-              title: task.title,
-              description: task.description,
-              featureTitle: task.featureTitle,
-              functionalPoints: task.functionalPoints,
-              technicalPoints: task.technicalPoints,
-              complexity: task.complexity,
-              uncertainty: task.uncertainty,
-              friction: task.friction,
-              nfrScale: task.nfrScale,
-              status: task.status,
-              dirty: false,
-            },
-          },
-          taskRef,
-        );
-
-        // Link task to its feature if found
-        const matchingFeature = features.find((f) => f.properties.title === task.featureTitle);
-        if (matchingFeature) {
-          b.upsertEdge({
-            type: "HAS_TASK",
-            from: matchingFeature.id,
-            to: { ref: taskRef },
-          });
-        }
-      }
-
-      for (const risk of techRisks) {
-        b.upsertNode({
-          type: "Risk",
-          properties: {
-            title: risk.title,
-            description: risk.description,
-            severity: risk.severity,
-            category: "technical",
-            mitigation: risk.mitigation,
-            dirty: false,
-          },
-        });
-      }
-    },
-    { actorId: "ai-architect" },
+  const missingLevels = missingC4Levels(
+    // Narrowed, so `properties.type` is the C4 kind union rather than unknown.
+    ofType(plan.nodes, "C4DiagramElement").map((node) => ({
+      type: node.properties.type ?? "",
+    })),
   );
+  if (missingLevels.length > 0) {
+    logMessage(
+      isEs
+        ? `⚠️ El modelo C4 no tiene ningún elemento de tipo: ${missingLevels.join(", ")}.`
+        : `⚠️ C4 model has no element of type: ${missingLevels.join(", ")}.`,
+    );
+  }
+
+  const written = await applyPlan(session, plan, {
+    actorId: "ai-architect",
+    language: isEs ? "es" : "en",
+    stamp: ARCHITECT_STAMP,
+  });
+  for (const dropped of written.droppedEdges) {
+    logMessage(
+      isEs
+        ? `⚠️ Relación descartada (extremo desconocido): ${dropped}`
+        : `⚠️ Dropped relationship (unknown endpoint): ${dropped}`,
+    );
+  }
+  reportUnlinkedTasks(session, plan, written.idsByRef, isEs, logMessage);
 
   const architectAgrees = true;
 
   logMessage(
     isEs
-      ? `✅ Arquitecto aprueba la arquitectura técnica y el desglose de tareas (6 ejes).`
-      : `✅ Architect approves technical architecture and 6-axis task estimation.`,
+      ? `✅ Arquitecto aprueba la arquitectura técnica y el desglose de tareas.`
+      : `✅ Architect approves technical architecture and task estimation.`,
   );
 
   const consensusReached = state.managerAgrees && architectAgrees;
@@ -344,7 +250,10 @@ flowchart TD
         managerAgrees: state.managerAgrees,
         architectAgrees,
         iteration,
-        pendingAssumptionId: undefined,
+        // `null` clears it; `undefined` is skipped by the property merge and
+        // would leave the resolved assumption's id in place — which the UI
+        // reads to decide whether to show the validation banner.
+        pendingAssumptionId: null,
         mode: state.mode ?? "initial",
       },
     },
@@ -358,8 +267,44 @@ flowchart TD
   };
 }
 
+/**
+ * A Task reaches the board through HAS_TASK and nothing else, so one that never
+ * got its edge is surfaced rather than swallowed: it is a plan defect the human
+ * can fix from the board, not a write that quietly did nothing.
+ */
+function reportUnlinkedTasks(
+  session: PlannerSession,
+  plan: PlannerPlan,
+  idsByRef: Record<string, string>,
+  isEs: boolean,
+  logMessage: (text: string) => void,
+): void {
+  const taskIds = new Set(
+    ofType(plan.nodes, "Task")
+      .map((node) => node.id ?? idsByRef[node.ref])
+      .filter((id): id is string => Boolean(id)),
+  );
+  if (taskIds.size === 0) return;
+
+  const snapshot = session.snapshot();
+  const linked = new Set(
+    edgesOfType(snapshot, "HAS_TASK").map((edge) => edge.to),
+  );
+  const unlinked = nodesOfType(snapshot, "Task")
+    .filter((node) => taskIds.has(node.id) && !linked.has(node.id))
+    .map((node) => node.properties.title || node.id);
+
+  if (unlinked.length > 0) {
+    logMessage(
+      isEs
+        ? `⚠️ ${unlinked.length} tarea(s) sin Feature: ${unlinked.join(", ")}. Enlázalas desde el tablero.`
+        : `⚠️ ${unlinked.length} task(s) with no Feature: ${unlinked.join(", ")}. Link them from the board.`,
+    );
+  }
+}
+
 async function runArchitectRevise(
-  session: CollabSession,
+  session: PlannerSession,
   state: PlannerState,
 ): Promise<Partial<PlannerState>> {
   const isEs = state.language === "es";
@@ -370,7 +315,7 @@ async function runArchitectRevise(
   const dirty = dirtyNodes(snapshot);
   const revisionMarkdown = formatRevisionContext(snapshot);
   const graphMarkdown = snapshotToMarkdown(snapshot, {
-    types: ["Epic", "Feature", "Assumption", "Risk", "Task", "C4Model"],
+    types: ["Epic", "Feature", "Assumption", "Risk", "Task", "C4DiagramElement"],
   });
 
   const logMessage = (text: string) => {
@@ -387,15 +332,14 @@ async function runArchitectRevise(
       : `[Iteration ${iteration}] Architect reviewing ${dirty.length} dirty node(s): C4, tasks, and technical risks.`,
   );
 
-  let updates: RevisionUpdate[] = [];
-  let creates: RevisionCreate[] = [];
+  let plan: PlannerPlan | undefined;
   let architectAgrees = true;
-  let usedModel = false;
 
   if (model) {
     try {
+      const schema = await plannerPlanSchema("architect", isEs ? "es" : "en");
       const prompt = isEs
-        ? `Eres un Arquitecto de Software (AI Architect). El usuario cambió nodos del plan. Revisa SOLO los nodos sucios y sus relaciones; adapta C4, tareas (6 ejes) y riesgos técnicos. No regeneres toda la arquitectura.
+        ? `Eres un Arquitecto de Software (AI Architect). El usuario cambió nodos del plan. Revisa SOLO los nodos sucios y sus relaciones; adapta C4, tareas (puntos + 4 ejes, descripción con Qué y Cómo) y riesgos técnicos. No regeneres toda la arquitectura. Usa Microsoft Learn si el cambio toca servicios Microsoft/Azure.
 
 Grafo actual:
 ${graphMarkdown}
@@ -403,10 +347,13 @@ ${graphMarkdown}
 ${revisionMarkdown}
 
 Reglas:
-- Actualiza nodos existentes por id.
-- Crea Tasks/C4/Riesgos solo si el cambio lo exige.
-- Enlaza Tasks a Features con HAS_TASK y a C4 con TARGETS_C4 cuando aplique.${formatUserReviewGuidance(state.reviewMessage, true)}`
-        : `You are an AI Software Architect. The user changed nodes in the plan. Review ONLY the dirty nodes and their relationships; adapt C4, 6-axis tasks, and technical risks. Do not regenerate the whole architecture.
+- Para cambiar un nodo existente, inclúyelo en "nodes" con su "id" del grafo de arriba.
+- Para crear uno nuevo, inclúyelo en "nodes" sin "id" y dale un "ref".
+- Toda estructura va en "edges": una Task sin arista HAS_TASK desde su Feature no está en el plan. Los extremos son ids del grafo o refs de este mismo plan, nunca títulos.
+- Para mover algo que ya existe, pon el id de la arista vieja en "removeEdges" y añade la nueva en "edges".
+- Person / System / Boundary / Container / Component son tipos distintos. Boundary es solo agrupación; System es software. external:true se dibuja como Person_Ext / System_Ext / Container_Ext.
+- agrees: true si la arquitectura revisada te parece completa.${formatUserReviewGuidance(state.reviewMessage, true)}`
+        : `You are an AI Software Architect. The user changed nodes in the plan. Review ONLY the dirty nodes and their relationships; adapt C4, tasks (points + 4 axes, description with What and How), and technical risks. Do not regenerate the whole architecture. Use Microsoft Learn if the change touches Microsoft/Azure services.
 
 Current graph:
 ${graphMarkdown}
@@ -414,57 +361,57 @@ ${graphMarkdown}
 ${revisionMarkdown}
 
 Rules:
-- Update existing nodes by id.
-- Create Tasks/C4/Risks only when the change requires it.
-- Link Tasks to Features with HAS_TASK and to C4 with TARGETS_C4 when relevant.${formatUserReviewGuidance(state.reviewMessage, false)}`;
+- To change an existing node, include it in "nodes" with its "id" from the graph above.
+- To create a new one, include it in "nodes" with no "id" and give it a "ref".
+- All structure lives in "edges": a Task with no HAS_TASK edge from its Feature is not in the plan. Endpoints are graph ids or refs from this same plan — never titles.
+- To move something that already exists, put the old edge's id in "removeEdges" and add the new one to "edges".
+- Person / System / Boundary / Container / Component are distinct types. Boundary is grouping only; System is software. external:true renders as Person_Ext / System_Ext / Container_Ext.
+- agrees: true when the revised architecture looks complete to you.${formatUserReviewGuidance(state.reviewMessage, false)}`;
 
-      const parsed = await invokeStructured(model, architectRevisionSchema, prompt, "architect_revision");
-      if (parsed.review.trim()) {
-        logMessage(parsed.review.trim());
+      plan = await invokeArchitectStructured(
+        session,
+        model,
+        schema,
+        prompt,
+        "architect_revision",
+        isEs,
+        logMessage,
+      );
+      if (plan.review?.trim()) {
+        logMessage(plan.review.trim());
       }
-      updates = parsed.updates.map((update) => ({
-        id: update.id,
-        properties: omitNullish(update.properties),
-      }));
-      creates = [
-        ...parsed.creates.map((create) => ({
-          type: create.type,
-          properties: omitNullish(create.properties),
-          link: create.link ?? undefined,
-        })),
-        ...risksToCreates(parsed.risks),
-      ];
-      architectAgrees = parsed.agrees;
-      usedModel = true;
+      architectAgrees = plan.agrees;
     } catch (err) {
       console.warn("LLM architect revise structured output error, falling back to deterministic:", err);
+      plan = undefined;
     }
   }
 
-  if (!usedModel) {
-    const dirtyTask = snapshot.nodes.find((n) => n.type === "Task" && n.properties.dirty === true);
-    const linkFrom =
+  if (!plan) {
+    plan = emptyPlan();
+    const dirtyTask = nodesOfType(snapshot, "Task").find((n) => n.properties.dirty === true);
+    const threatened =
       dirtyTask?.id ?? dirty.find((n) => n.type === "Feature" || n.type === "Epic")?.id;
-    if (linkFrom) {
+    if (threatened) {
       const note = state.reviewMessage?.trim();
       const baseDescription = isEs
-        ? "Los cambios del usuario pueden desactualizar estimaciones de 6 ejes o el modelo C4."
-        : "User changes may stale 6-axis estimates or the C4 model.";
-      creates.push({
+        ? "Los cambios del usuario pueden desactualizar estimaciones o el modelo C4."
+        : "User changes may stale estimates or the C4 model.";
+      plan.nodes.push({
         type: "Risk",
+        ref: "revision-tech-risk",
         properties: {
           title: isEs ? "Impacto técnico del cambio de alcance" : "Technical impact of scope change",
           description: note
             ? `${baseDescription} ${isEs ? "Nota del usuario:" : "User note:"} ${note}`
             : baseDescription,
           severity: "medium",
-          category: "technical",
           mitigation: isEs
             ? "Re-estimar tareas sucias y ajustar el C4 antes de implementar."
             : "Re-score dirty tasks and adjust C4 before implementation.",
         },
-        link: { type: "HAS_RISK", from: linkFrom },
       });
+      plan.edges.push({ type: "HAS_RISK", from: threatened, to: "revision-tech-risk" });
     }
     logMessage(
       isEs
@@ -473,7 +420,23 @@ Rules:
     );
   }
 
-  await applyRevisionWrites(session, { updates, creates }, "ai-architect");
+  plan = { ...plan, nodes: splitCombinedC4PlanNodes(plan.nodes) };
+
+  // One atomic revision: a collaborator sees the whole adapted plan appear at
+  // once, not a sequence of half-repaired intermediate states.
+  const written = await applyPlan(session, plan, {
+    actorId: "ai-architect",
+    language: isEs ? "es" : "en",
+    stamp: ARCHITECT_STAMP,
+  });
+  for (const dropped of written.droppedEdges) {
+    logMessage(
+      isEs
+        ? `⚠️ Relación descartada (extremo desconocido): ${dropped}`
+        : `⚠️ Dropped relationship (unknown endpoint): ${dropped}`,
+    );
+  }
+  reportUnlinkedTasks(session, plan, written.idsByRef, isEs, logMessage);
 
   const consensusReached = state.managerAgrees && architectAgrees;
 
@@ -504,7 +467,7 @@ Rules:
         managerAgrees: state.managerAgrees,
         architectAgrees,
         iteration,
-        pendingAssumptionId: undefined,
+        pendingAssumptionId: null,
         mode: "revise",
       },
     },

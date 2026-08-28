@@ -1,0 +1,78 @@
+name: type-emitter-fixture
+version: 1
+description:
+  en: One node type per interesting property shape, so the emitter has something to be wrong about.
+  es: Un tipo de nodo por cada forma de propiedad interesante.
+schema:
+  name: EmitterGraph
+  version: 1
+  config:
+    schemaId: emitter-graph
+    idStrategy: uuid
+  nodes:
+    Sample:
+      description:
+        en: Every property type the schema language has.
+      guidelines:
+        en:
+          - Keep this fixture exhaustive; it is the only place the rarer types are exercised.
+      properties:
+        # required, no default -> required to create, still optional to merge
+        name:
+          type: string
+          required: true
+          description:
+            en: What the sample is called.
+          maxLength: 120
+        # optional scalar
+        note:
+          type: string
+        # enum -> a union, never an open string
+        stage:
+          type: enum
+          values: [draft, review, done]
+          default: draft
+          description:
+            en: Where the sample has got to.
+        # number with bounds -> bounds land in the JSDoc, not the type
+        score:
+          type: number
+          integer: true
+          min: 1
+          max: 10
+          description:
+            en: How good it is.
+        flag:
+          type: boolean
+          required: true
+        when:
+          type: datetime
+        # json is stringified on the way in, so it reads back as a string
+        payload:
+          type: json
+        # CRDT types: always present on read, optional on write
+        body:
+          type: text
+        labels:
+          type: array
+        extras:
+          type: map
+        # derived: readonly, and absent from every write shape
+        doubled:
+          type: number
+          derived: score + score
+    Other:
+      properties:
+        title:
+          type: string
+          required: true
+  edges:
+    LINKS_TO:
+      from: [Sample]
+      to: [Sample, Other]
+      directed: true
+      description:
+        en: One sample pointing at another.
+      properties:
+        weight:
+          type: number

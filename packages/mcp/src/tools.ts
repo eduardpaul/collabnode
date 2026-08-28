@@ -18,6 +18,7 @@ import {
   graphSnapshot,
   resolveNodeRef,
   upsertGraphEdge,
+  renderView,
   upsertGraphNode,
   type CollabSession,
   type GraphNodeRef,
@@ -26,6 +27,7 @@ import {
   type NodeRef,
 } from "@collabnode/runtime";
 import {
+  ADVANCED_TOOLS,
   redactSchema,
   resolveGuidelines,
   resolveI18nString,
@@ -34,8 +36,10 @@ import {
   type GraphSchema,
   type NamedToolDef,
   type NodeAccessPolicy,
+  type AdvancedTool,
   type NodeTypeDef,
   type ToolsPolicyDef,
+  type ViewDef,
 } from "@collabnode/schema";
 
 import { z, type ZodType } from "zod/v4";
@@ -48,7 +52,7 @@ import {
   type SupportedLanguage,
 } from "./i18n.js";
 import { toolName } from "./names.js";
-import { propertiesZod, propertyZod } from "./property-zod.js";
+import { paramsZod, propertiesZod, propertyZod } from "./property-zod.js";
 import {
   emptyList,
   filterChanges,
@@ -322,6 +326,11 @@ function asNodeRef(value: unknown): GraphNodeRef {
 export interface BuildToolsOptions {
   graphKind?: string;
   policy?: ToolsPolicyDef;
+  /**
+   * Named graph slices from the workspace type's `views:` block. Each becomes a
+   * read-only `view_<name>` tool, filtered by the role's `views` allowlist.
+   */
+  views?: Record<string, ViewDef>;
   agentRole?: string;
   language?: SupportedLanguage | string;
   /**
@@ -486,13 +495,29 @@ export function buildTools(
     tools.push({ name, description, inputSchema, annotations, handler: safe(handler) });
   };
 
+  // `tools.advanced` is the only door to ADVANCED_TOOLS: each one either hands
+  // the model the whole graph or takes it back as an argument, and the targeted
+  // reads plus declared `views:` cover the same ground far more cheaply. A
+  // workspace that genuinely wants Cypher or batched writes asks for them.
+  const advanced = new Set<AdvancedTool>(policy?.advanced ?? []);
+  const wants = (tool: AdvancedTool) => advanced.has(tool);
+
   add(
     "graph_describe",
     t.tools.describe,
     z.object({}),
     async () => {
       const described = graphDescribe(session);
-      return textResult(access.restricted ? filterDescribe(described, access) : described);
+      const filtered = access.restricted ? filterDescribe(described, access) : described;
+      // The contract must advertise the tools this caller actually has. Reads
+      // are a fixed list in the runtime, but `tools.advanced` and the expose /
+      // agent filters all subtract from it, so intersect with what was built —
+      // `tools` is read at call time, after every filter has run.
+      const built = new Set(tools.map((tool) => tool.name));
+      return textResult({
+        ...filtered,
+        reads: filtered.reads.filter((name) => built.has(name)),
+      });
     },
   );
 
@@ -620,37 +645,39 @@ export function buildTools(
     },
   );
 
-  add(
-    "graph_snapshot",
-    t.tools.snapshot.description,
-    z.object({
-      types: z.array(z.string()).optional().describe(t.tools.snapshot.types),
-      includeText: z.boolean().optional().describe(t.tools.snapshot.includeText),
-    }),
-    async (args) => {
-      const { types, empty } = narrowTypes(
-        Array.isArray(args.types) ? (args.types as string[]) : undefined,
-        access,
-      );
-      const snapshot = session.snapshot();
-      if (empty) {
-        return textResult({
-          schemaId: snapshot.schemaId,
-          schemaHash: snapshot.schemaHash,
-          nodes: [],
-          edges: [],
-        });
-      }
-      const result = graphSnapshot(session, { types, includeText: args.includeText === true });
-      return textResult(concealing ? filterSnapshot(result, session, access) : result);
-    },
-  );
+  if (wants("graph_snapshot")) {
+    add(
+      "graph_snapshot",
+      t.tools.snapshot.description,
+      z.object({
+        types: z.array(z.string()).optional().describe(t.tools.snapshot.types),
+        includeText: z.boolean().optional().describe(t.tools.snapshot.includeText),
+      }),
+      async (args) => {
+        const { types, empty } = narrowTypes(
+          Array.isArray(args.types) ? (args.types as string[]) : undefined,
+          access,
+        );
+        const snapshot = session.snapshot();
+        if (empty) {
+          return textResult({
+            schemaId: snapshot.schemaId,
+            schemaHash: snapshot.schemaHash,
+            nodes: [],
+            edges: [],
+          });
+        }
+        const result = graphSnapshot(session, { types, includeText: args.includeText === true });
+        return textResult(concealing ? filterSnapshot(result, session, access) : result);
+      },
+    );
+  }
 
   // Cypher runs against the projection, which knows nothing of this role's
   // policy and cannot be filtered after the fact once a query aggregates. A role
   // with hidden node types therefore gets no `graph_query` at all — the tools
   // above answer the same questions within its view.
-  if (!concealing) {
+  if (wants("graph_query") && !concealing) {
     add(
       "graph_query",
       queryToolDescription(graphKind, view, lang),
@@ -748,25 +775,27 @@ export function buildTools(
     // is reachable as soon as *any* type is writable, and `applyOps` knows
     // nothing about roles, so a role allowed to write one node type could
     // rewrite and delete every other one through here.
-    add(
-      "graph_apply_batch",
-      t.tools.applyBatch.description,
-      z.object({ ops: batchOps.describe(t.tools.applyBatch.ops) }),
-      async (args) =>
-        textResult(
-          await session.applyBatch(
-            authorizeBatchOps(batchOps.parse(args.ops) as GraphOpInput[]),
+    if (wants("graph_apply_batch")) {
+      add(
+        "graph_apply_batch",
+        t.tools.applyBatch.description,
+        z.object({ ops: batchOps.describe(t.tools.applyBatch.ops) }),
+        async (args) =>
+          textResult(
+            await session.applyBatch(
+              authorizeBatchOps(batchOps.parse(args.ops) as GraphOpInput[]),
+            ),
           ),
-        ),
-      idempotentWrite,
-    );
+        idempotentWrite,
+      );
+    }
   }
 
   // Withheld from a concealing role for the reason `graph_query` is: a diff
   // aggregates the whole graph into one answer, and there is no filtering it
   // afterwards — the hidden types would be named in `ops` and spelled out in
   // the Markdown. The role's own reads already show it everything it may see.
-  if (!concealing) {
+  if (wants("graph_diff_since") && !concealing) {
     add(
       "graph_diff_since",
       t.tools.diffSince.description,
@@ -873,6 +902,58 @@ export function buildTools(
       if (namedTool) {
         tools.push(namedTool);
       }
+    }
+  }
+
+  // One read-only tool per view the role is granted.
+  //
+  // Views are appended after `tools.expose` for the same reason named tools are:
+  // they are declared by name in the document, not generated, so an `expose`
+  // allowlist that predates them should not silently drop them. They are still
+  // subject to `agents[].tools` below, and to `agents[].views` here.
+  if (options.views) {
+    const agent =
+      options.agentRole && policy?.agents
+        ? policy.agents.find(
+            (a) => a.role === options.agentRole || a.actorId === options.agentRole,
+          )
+        : undefined;
+    const grantsAll = toolListAllowsAll(agent?.views);
+    const granted = grantsAll ? undefined : new Set(agent?.views);
+
+    for (const [viewName, viewDef] of Object.entries(options.views)) {
+      if (granted && !granted.has(viewName)) {
+        continue;
+      }
+      // A view whose roots are all hidden from this role can only ever answer
+      // "nothing", and offering a tool that always answers nothing tells the
+      // model a type exists. Withhold it, the way `graph_query` is withheld.
+      const rootTypes = viewDef.select?.roots?.types;
+      if (rootTypes && rootTypes.length > 0 && rootTypes.every((type) => access.isHidden(type))) {
+        continue;
+      }
+
+      const viewDesc = resolveI18nString(viewDef.description, lang) ?? "";
+      const guidance = resolveGuidelines(viewDef.guidance, lang);
+      add(
+        toolName("view", viewName),
+        t.tools.view.description(
+          viewName,
+          viewDesc,
+          guidance.length > 0 ? t.tools.view.guidanceBlurb(guidance.join("; ")) : "",
+        ),
+        paramsZod(viewDef.params ?? {}, lang),
+        async (args) =>
+          textResult(
+            renderView(session.snapshot(), viewDef, args, {
+              name: viewName,
+              language: lang,
+              access,
+              schema,
+            }),
+          ),
+        readOnly,
+      );
     }
   }
 

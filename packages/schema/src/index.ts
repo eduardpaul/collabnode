@@ -1,4 +1,5 @@
 export type {
+  AdvancedTool,
   AgentDef,
   AgentNodePolicy,
   ArtifactRequirement,
@@ -36,9 +37,16 @@ export type {
   UiMeta,
   UpsertEdgeInput,
   UpsertNodeInput,
+  ViewDef,
+  ViewDirection,
+  ViewFormat,
+  ViewRootsDef,
+  ViewSelectDef,
+  ViewTraverseDef,
   WorkspaceType,
 } from "./types.js";
 export {
+  ADVANCED_TOOLS,
   CRDT_PROPERTY_TYPES,
   DEFAULT_HISTORY_LIMIT,
   DEFAULT_IDENTITY_BOOST,
@@ -100,3 +108,42 @@ export {
   type JsonSchemaObject,
   type JsonSchemaProperty,
 } from "./json-schema.js";
+export {
+  workspaceToTypescript,
+  type EmitTypescriptOptions,
+} from "./emit-ts.js";
+export type {
+  EdgeTypeDefLiteral,
+  GraphSchemaLiteral,
+  NodeTypeDefLiteral,
+  PropertyDefLiteral,
+  WorkspaceTypeLiteral,
+} from "./literal.js";
+export type {
+  AnyGraph,
+  PropertyMap,
+  PropertyValue,
+  EdgeEndpoints,
+  EdgeInput,
+  EdgeInputOf,
+  EdgeNameOf,
+  EdgeProps,
+  EdgePropsOf,
+  Equal,
+  Expect,
+  GraphTypeMap,
+  GraphTypes,
+  InputOf,
+  NodeCreate,
+  NodeInput,
+  NodeNameOf,
+  NodeProps,
+  NodeTypeNames,
+  NodeTypeShape,
+  EdgeTypeShape,
+  PropsOf,
+  SchemaOf,
+  StrictInput,
+  StrictOf,
+  EdgeTypeNames,
+} from "./infer.js";

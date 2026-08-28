@@ -97,11 +97,14 @@ pnpm collabnode validate packages/bench/schema.yaml
 pnpm collabnode serve packages/bench/schema.yaml --backend memory
 pnpm collabnode mcp packages/bench/schema.yaml --backend memory --actor agent-1
 pnpm collabnode ddl packages/bench/schema.yaml --graph age --graph-name bench
+pnpm collabnode types examples/solution-planner/workspaces/solution-planner.yaml -o src/workspace.types.ts
 ```
 
 The CLI takes a plain **schema** document — one graph, one document. A
 [workspace type](#workspace-types-and-the-hub) (`type:` + `schema:` + `template:`
 …) is rejected by `validate`; those are opened through the hub, not the CLI.
+`types` is the exception: it reads a **workspace type** and writes
+[TypeScript types](#typed-schemas-collabnode-types) for it.
 
 `serve --backend fluid` will try Tinylicious on port 7070 (same as `init({ collab: { kind: "fluid" } })`). Spawned Tinylicious uses a temp snapshot directory unless you pin `collab.storageDir` (for example `data/tinylicious`); winston stays off unless `TINYLICIOUS_LOG_LEVEL` is set. Close leftover browser tabs after a restart — they keep asking for the previous `documentId`. Azure Fluid Relay is a provisioned Azure service — pass `relay: "azure"` / `--relay azure` with env `AZURE_FLUID_TENANT_ID`, `AZURE_FLUID_ENDPOINT`, `AZURE_FLUID_KEY`.
 
@@ -213,6 +216,186 @@ Drop-in graph UI (any schema) — same `session` as `connect()`:
 `ui.label` / `ui.color` / `ui.icon` on the YAML drive labels, colors, and shapes. `editable="false"` is watch-only. Layout stays local to the tab; node/edge edits go through `CollabSession`.
 
 Hocuspocus uses the same join payload with `collab.kind: "hocuspocus"` and a WebSocket `url`. Rooms are created on the server; browsers always **join**. Never put the Azure tenant key in Vite env.
+
+## Typed schemas (`collabnode types`)
+
+The schema is a runtime structure, so by default `type` is a `string` and
+`properties` is a bag. `collabnode types` generates a TypeScript module from one
+workspace YAML, and passing it to the runtime turns every read and write into
+something the compiler checks against *that* schema.
+
+```bash
+collabnode types workspaces/planner.yaml -o src/workspace.types.ts --name Planner
+```
+
+The generated module exports the schema as an `as const` literal, `Planner` (the
+type map you pass around), and — per node type — a JSDoc'd `…Props` interface,
+plus `…Input`, `…Strict` and `…Node` aliases. **Check it in and never edit it.**
+
+### Keep it current without running anything
+
+```ts
+// server.ts — the dev server regenerates on save
+import { collabnodeTypes } from "collabnode/vite";
+
+const vite = await createViteServer({
+  plugins: [collabnodeTypes({
+    input: "workspaces/planner.yaml",
+    output: "src/workspace.types.ts",
+    name: "Planner",
+  })],
+  server: { middlewareMode: true },
+});
+```
+
+Save the YAML and the `.ts` is rewritten; your editor's TypeScript server picks
+it up from disk, so a renamed property goes red across the app with no command
+and no restart. For anything not behind Vite, `collabnode types … --watch`. As a
+floor, a `predev` script; in CI, `--check`, which exits non-zero when the file on
+disk no longer matches the YAML.
+
+### On the server
+
+```ts
+import { nodesOfType, singletonOfType, type CollabSession } from "collabnode";
+import type { Planner } from "./workspace.types.ts";
+
+// A session you open yourself
+const session = await CollabSession.open<Planner>(id, options);
+
+// One the hub handed you — it serves any workspace, so it arrives untyped
+const ws = await hub.open("planner", { id, actorId: "server" });
+const typed = ws.session.as<Planner>();
+
+await typed.upsertNode({ type: "Epic", properties: { title: "Onboarding", priority: "high" } });
+await typed.batch((b) => {
+  const epic = b.upsertNode({ type: "Epic", properties: { title: "Billing" } }, "e1");
+  b.upsertNode({ type: "Feature", properties: { title: "Invoices" } }, "f1");
+  b.upsertEdge({ type: "HAS_FEATURE", from: epic, to: { ref: "f1" } });
+});
+
+const snapshot = typed.snapshot();
+const epics = nodesOfType(snapshot, "Epic");
+epics[0]?.properties.priority; // "low" | "medium" | "high"
+singletonOfType(snapshot, "SolutionState")?.properties.status;
+```
+
+### In the browser
+
+Same map, on the hooks:
+
+```tsx
+import { useCollabJoin, useCollabNodes } from "@collabnode/react";
+import type { Planner } from "./workspace.types.ts";
+
+const { session, snapshot, nodesByType, upsertNode } = useCollabJoin<Planner>("/api/collab/join");
+
+const epics = nodesByType.Epic ?? [];        // EpicNode[]; `nodesByType.Epci` does not compile
+const tasks = useCollabNodes(session, "Task");
+await upsertNode({ type: "Epic", properties: { title: "New" } });
+```
+
+The graph and mermaid web components render *any* workspace, so hand them the
+untyped session: `graphRef.current.session = session.as()`.
+
+### Selecting by type
+
+`snapshot.nodes` is a union discriminated on `type`. Comparing against a name the
+schema does not have is already an error, but `filter` hands back the whole
+union, so reading a property only Epics have still will not compile. The
+selectors carry the narrowing out:
+
+```ts
+import { nodesOfType, nodeOfType, singletonOfType, edgesOfType, ofType, findOfType } from "collabnode";
+
+nodesOfType(snapshot, "Epic");                  // EpicNode[]
+nodeOfType(snapshot, "Feature", id);            // undefined if `id` is some other type
+singletonOfType(snapshot, "SolutionState");     // the one node of a `singleton:` type
+edgesOfType(snapshot, "HAS_FEATURE");
+
+ofType(plan.nodes, "Task");                     // works on anything with a `type`
+findOfType(plan.nodes, "Assumption", (n) => !n.id);
+```
+
+`nodeOfType` returning `undefined` for an id of the wrong type is deliberate: a
+plain `find` by id hands back a node the caller then reads as the type they
+expected.
+
+### What is checked
+
+```ts
+await session.upsertNode({ type: "Epci",    properties: { title: "x" } });                  // unknown node type
+await session.upsertNode({ type: "Epic",    properties: { title: "x", priority: "urgent" } }); // not a declared enum value
+await session.upsertNode({ type: "Epic",    properties: { title: "x", owner: "me" } });     // not a property of Epic
+await session.upsertNode({ type: "Feature", properties: { priority: "low" } });             // Feature has no `priority`
+await session.upsertEdge({ type: "HAS_FEATURES", from, to });                               // unknown edge type
+snapshotToMarkdown(snapshot, { types: ["Epic", "Featrue"] });                                // unknown node type
+```
+
+### Edge cases
+
+These are the parts that surprise people.
+
+**An upsert is a merge, so every property is optional.** Whether a write creates
+or updates is not knowable at compile time — a `singleton:` write carries no id
+and still merges — and `mergeProperties` checks required properties against the
+*merged result*, not against your write. So sending only `{ priority: "low" }` to
+an existing Epic is correct and compiles. Use `NodeCreate<typeof planner, "Epic">`
+where you know you are creating and want `title` demanded.
+
+**`text` / `map` / `array` are always present on read.** `hydrateNode` materializes
+them as `""`, `{}` and `[]` on every snapshot, so a `text` property is `string`,
+never `string | undefined` — even before anyone has typed into it.
+
+**A property with a `default:` is also always present on read**, because create
+fills it in. It is still optional to write.
+
+**`json` reads back as a `string`.** The runtime `JSON.stringify`s it on the way
+in, so the write type accepts `unknown` and the read type is `string`.
+
+**`derived:` properties are readonly and absent from writes entirely.** The
+runtime computes them and silently drops writes to them, so the write type has no
+such key at all rather than an optional one.
+
+**`CollabSession<S>` is invariant**, because `S` appears in both reads and writes.
+A typed session is therefore *not* accepted where an untyped one is expected.
+`session.as<S>()` puts a schema on, `session.as()` takes it off — use the latter
+for library APIs that serve any schema (`getDeepAgentConfig`, the graph web
+components).
+
+**Structured output sends `null`, not absent keys.** `planZod(schema, { mode: "strict" })`
+requires every key, so "no value" arrives as `null`; strip them before writing.
+The plan type describes both, because a strict answer is assignable to the write
+shape.
+
+### What is *not* checked
+
+Worth knowing so you do not trust the types further than they go. All three of
+these compile and fail at runtime instead:
+
+```ts
+// Endpoints are ids. Nothing in the type says which node type an id points at,
+// even though the schema says HAS_FEATURE runs Epic -> Feature.
+await session.upsertEdge({ type: "HAS_FEATURE", from: someTaskId, to: someRiskId });
+
+// An id that does not exist.
+await session.upsertNode({ id: "no-such-node", type: "Epic", properties: { title: "x" } });
+
+// Bounds are not types. The schema says 1..21.
+await session.upsertNode({ type: "Task", properties: { title: "t", functionalPoints: 999 } });
+```
+
+Iterating a heterogeneous array — a plan's entries, a diff — also needs one cast
+at the write, because TypeScript cannot re-correlate `node.type` with
+`node.properties` while walking a union. Narrow with `ofType` first where you can.
+
+### `--full`
+
+By default the emitted literal is trimmed to the fields the types are derived
+from (a few KB). `--full` emits the whole workspace — descriptions, guidelines,
+views, template — which makes the const usable as a runtime `WorkspaceType`, so an
+app can import it instead of parsing YAML. Consumers that only want types should
+`import type`, which erases the module entirely.
 
 ## Collab backends
 
@@ -568,6 +751,36 @@ tools:
 list for the same default. YAML aliases cannot be empty, so a bare `- *` is
 quoted at parse time; `- "*"` and `expose: ["*"]` work too.
 
+### Advanced tools (`tools.advanced`)
+
+Four generated tools are **off unless a workspace asks for them**:
+
+| Tool | Why it is off | What to use instead |
+|---|---|---|
+| `graph_snapshot` | returns the entire graph, every property, every edge | a [view](#views-views), or `graph_list` / `graph_get` |
+| `graph_diff_since` | takes a whole previous snapshot back as an *argument* | `graph_changes({ since })` |
+| `graph_query` | needs Cypher, and only works where a projection is configured | `graph_neighbors`, or a view's `traverse` |
+| `graph_apply_batch` | nothing in the batch reaches other participants until all of it lands | one `upsert_node_*` / `upsert_edge_*` per write |
+
+Each one asks the model to hold the whole graph in its head, which is where small
+models fall over. Declared `views:` and the targeted reads answer the same
+questions in a fraction of the tokens, and in a live collaborative document
+writing one node at a time is a *feature* — every write streams to the other
+participants as it happens rather than arriving in a lump.
+
+Name the ones you want:
+
+```yaml
+tools:
+  advanced: [graph_query]      # only Cypher; the other three stay off
+```
+
+`advanced` is additive and independent of `expose`: `expose` filters what was
+generated, `advanced` decides what gets generated at all, so `expose: ["*"]` does
+not bring these back. The node policy still governs them — a role with `hidden`
+types gets no `graph_query` or `graph_diff_since` however the workspace is
+configured. `graph_describe` advertises only the reads the caller actually got.
+
 ### Per-agent node policy
 
 A workspace type can give each agent role a different reach over node types. Two
@@ -618,6 +831,107 @@ document directly through `CollabSession` is not bound by it. On the hub
 endpoint the role defaults to the caller-supplied `?role=`, which is fine for
 steering a cooperative agent but not for confining an untrusted one — pass
 `agentRoleFrom` to `createHubMcpHandler` to derive the role from your own auth.
+
+### Views (`views:`)
+
+An agent rarely wants the whole graph. It wants a slice: *the epics with their
+features and tasks and the estimations on those tasks*, or *whatever the human
+just touched, plus one hop of context*. Declare that slice once, as a **view**,
+and it reaches the agent as a tool, the model as a prompt entry, and the browser
+as a panel — one declaration instead of three copies that drift.
+
+```yaml
+views:
+  review_plan:
+    title:
+      en: Review plan
+    description:
+      en: Epics with their features, tasks and estimations.
+    guidance:                     # what to do with what you see
+      en:
+        - Every Feature should have at least one Task.
+    params:
+      epic:
+        type: string
+        description:
+          en: Epic title or id. Omit to review the whole plan.
+    select:
+      roots:
+        types: [Epic]
+        where: "params.epic == null || title == params.epic || id == params.epic"
+      traverse:
+        edges: [HAS_FEATURE, HAS_TASK]
+        direction: out            # in | out | both — default out
+        depth: 2                  # default 1
+      include: [Assumption]       # whole types, unattached to the roots
+    fields:                       # per-type projection; unlisted types keep everything
+      Epic: [title, description, priority]
+      Task: [title, functionalPoints, technicalPoints]
+      "*": [title]                # fallback for types not named
+    edges: true                   # relationships section — default true
+    maxNodes: 200                 # default 100
+    format: markdown              # markdown | json — default markdown
+```
+
+Each view becomes a read-only MCP tool named `view_<name>`, whose input schema is
+the view's `params`:
+
+```
+view_review_plan()                  → the whole plan
+view_review_plan(epic: "Checkout")  → that epic, its features, its tasks
+```
+
+Grant them per role, with the same `*` wildcard the other lists use. Granted
+views are also listed by name in the agent's system prompt, so the model knows
+they exist:
+
+```yaml
+tools:
+  agents:
+    - role: manager
+      actorId: ai-manager
+      views: [review_plan, dirty_review]   # omit, or ["*"], for every view
+```
+
+**The `where` context.** Bare identifiers are node properties, so `dirty == true`
+and `priority == 'high'` read the way you would write them; parameters live under
+`params.` so one can share a name with a property without either shadowing the
+other. `id` and `type` are always available. `==` is loose, which makes
+`params.epic == null` the idiomatic "parameter not supplied" test — that is how a
+parameterized view degrades into an unparameterized one. Expressions are parsed
+when the document loads, so a typo is a schema error rather than a view that
+silently selects nothing.
+
+**Resolution order.** Roots are selected, traversal expands from them, `include`
+types are unioned in, node types hidden from the role are struck out, and only
+then is `maxNodes` applied. Edges are kept when *both* endpoints survive, so a
+rendering never points at a node the reader cannot see.
+
+**Views are reads, and obey the policy above.** A node type hidden from a role is
+dropped from that role's rendering of a view, and a view whose roots are all
+hidden from a role is withheld from it entirely — the same call `graph_query`
+gets, and for the same reason: an aggregate answer cannot be filtered after the
+fact. Views never write.
+
+In the browser, the same declarations travel in your join payload and drive the
+UI, so a panel and an agent cannot disagree about what "the plan" is:
+
+```tsx
+const { session, join } = useCollabJoin("/api/collab/join");
+const plan = useCollabView(session, join?.views?.review_plan, { epic });
+// plan.nodes, plan.edges, plan.fields — recomputed as the graph changes
+```
+
+`<collab-graph>` takes one as a property (a view is an object with parameters,
+not an attribute string):
+
+```ts
+graphEl.view = { def: join.views.architecture, name: "architecture" };
+```
+
+Not a query language: a view returns nodes and edges, never computed rows. For
+aggregates, turn on `graph_query` under
+[`tools.advanced`](#advanced-tools-toolsadvanced).
 
 ## Example: Voice Board (Voice Live + WebRTC + Multi-Workspace)
 

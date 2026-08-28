@@ -1,4 +1,4 @@
-import { resolveI18nString, type PropertyDef } from "@collabnode/schema";
+import { resolveI18nString, type ParamDef, type PropertyDef } from "@collabnode/schema";
 import { z, type ZodType } from "zod/v4";
 import { getLocale, type SupportedLanguage } from "./i18n.js";
 
@@ -83,6 +83,48 @@ export function propertiesZod(
       continue;
     }
     shape[name] = propertyZod(def, language);
+  }
+  return z.object(shape);
+}
+
+/**
+ * Zod for a view's parameters. Params are a smaller vocabulary than properties
+ * — no enums, no CRDT types — and are optional unless declared `required`, so
+ * that a parameterized view stays callable with no arguments at all.
+ */
+export function paramsZod(
+  params: Record<string, ParamDef>,
+  language?: SupportedLanguage | string,
+): z.ZodObject<Record<string, ZodType>> {
+  const shape: Record<string, ZodType> = {};
+  for (const [name, def] of Object.entries(params)) {
+    let schema: ZodType;
+    switch (def.type) {
+      case "number":
+        schema = z.number();
+        break;
+      case "boolean":
+        schema = z.boolean();
+        break;
+      case "array":
+        schema = z.array(z.unknown());
+        break;
+      case "object":
+      case "json":
+        schema = z.unknown();
+        break;
+      default:
+        schema = z.string();
+        break;
+    }
+    const desc = resolveI18nString(def.description, language);
+    if (desc) {
+      schema = schema.describe(desc);
+    }
+    if (!def.required) {
+      schema = schema.optional();
+    }
+    shape[name] = schema;
   }
   return z.object(shape);
 }

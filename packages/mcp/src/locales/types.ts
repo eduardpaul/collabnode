@@ -117,9 +117,29 @@ export interface McpLocaleCatalog {
       guidelinesBlurb: string,
     ) => string;
     namedTool: (name: string) => string;
+    view: {
+      /** Description of a generated `view_<name>` tool. */
+      description: (name: string, description: string, guidanceBlurb: string) => string;
+      guidanceBlurb: (guidance: string) => string;
+    };
     nodeRef: {
       idOrPrefix: string;
       identityObject: string;
+    };
+    plan: {
+      /** The `ref` a plan gives a node it is creating. */
+      nodeRef: string;
+      /** The id of an existing node a plan entry updates. */
+      nodeId: string;
+      /** An edge endpoint: an existing node's id, or a `ref` from this plan. */
+      endpoint: string;
+      nodes: string;
+      edges: string;
+      /** Guidance appended to a node type's own description. */
+      relationshipsAreEdges: string;
+      /** Bounds moved out of the JSON schema and into the description. */
+      numberRange: (min: number | undefined, max: number | undefined) => string;
+      maxLength: (max: number) => string;
     };
     nodeUpsert: {
       id: string;

@@ -51,6 +51,9 @@ schema:
       to: [Incident, Decision]
 
 tools:
+  # This fixture exercises the policy on every generated tool, so it opts in to
+  # the ones tools.advanced gates.
+  advanced: [graph_snapshot, graph_query, graph_diff_since, graph_apply_batch]
   named:
     log_note:
       description: Attach a private note

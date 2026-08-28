@@ -16,6 +16,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "import": "./dist/vite.js"
     }
   },
   "files": [
@@ -54,7 +58,6 @@
     "@collabnode/runtime": "workspace:*",
     "@collabnode/schema": "workspace:*"
   },
-
   "peerDependencies": {
     "@fluidframework/azure-client": "^2.40.0",
     "@ladybugdb/core": ">=0.11.0"

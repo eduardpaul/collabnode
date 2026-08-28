@@ -76,7 +76,9 @@ describe("generatePrompts", () => {
     expect(system.text).toContain("task-board");
     expect(system.text).toContain("doc-1");
     expect(system.text).toContain("agent-1");
-    expect(system.text).toContain("Prefer graph_list, graph_get, graph_search, and graph_neighbors over graph_snapshot");
+    // The rule only fires where graph_snapshot exists to be preferred against,
+    // and a bare schema has no `tools.advanced` to turn it on.
+    expect(system.text).not.toContain("over graph_snapshot");
 
     const task = prompts.find((prompt) => prompt.name === "work-on-Task")!;
     expect(task.text).toContain("Titles are imperative and short");
@@ -158,7 +160,7 @@ nodes:
     expect(system.text).toContain("doc-es-1");
     expect(system.text).toContain("Actor activo: agente-1");
     expect(system.text).toContain("Reglas de colaboración y grafo");
-    expect(system.text).toContain("Prefiere graph_list, graph_get, graph_search y graph_neighbors sobre graph_snapshot");
+    expect(system.text).not.toContain("sobre graph_snapshot");
     expect(system.text).toContain("## Tipos de nodo");
     expect(system.text).toContain("## Tipos de arista");
     expect(system.text).toContain("Campos de identidad: [title]");

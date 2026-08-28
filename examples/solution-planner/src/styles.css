@@ -228,6 +228,13 @@ body {
   color: var(--success);
 }
 
+/* An agent is mid-run right now: the badge pulses until its step lands. */
+.badge-agent.working {
+  border-color: var(--warning);
+  color: var(--warning);
+  animation: pulse 1.6s infinite;
+}
+
 /* Human In The Loop Banner */
 .validation-banner {
   background: rgba(245, 158, 11, 0.15);
@@ -332,6 +339,37 @@ body {
   box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.25);
 }
 
+/* Tasks are grouped by the Feature they hang off, so the HAS_TASK edge is
+   what the eye reads first — not a title repeated on every card. */
+.task-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-left: 2px solid rgba(6, 182, 212, 0.4);
+  padding-left: 10px;
+}
+
+.task-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.task-group-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #67e8f9;
+  margin-right: auto;
+}
+
+.task-group-orphan {
+  border-left-color: var(--warning);
+}
+
+.task-group-orphan .task-group-title {
+  color: var(--warning);
+}
+
 .badge-dirty {
   background: rgba(245, 158, 11, 0.18);
   color: var(--warning);
@@ -358,7 +396,7 @@ body {
   flex-wrap: wrap;
 }
 
-/* 6-Axis Task Estimation Badges */
+/* Task estimation badges */
 .axes-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -387,12 +425,6 @@ body {
   color: var(--cyan);
 }
 
-.axis-full {
-  grid-column: span 2;
-  font-size: 11px;
-  color: #cbd5e1;
-}
-
 /* Graph Canvas */
 .graph-container {
   background: #090d16;
@@ -403,10 +435,26 @@ body {
   position: relative;
 }
 
-collab-graph {
+collab-graph,
+collab-mermaid {
   width: 100%;
   height: 100%;
   display: block;
+}
+
+.mermaid-container {
+  background: #090d16;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-height: 220px;
+  height: 280px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.mermaid-container.mermaid-all {
+  height: 240px;
+  min-height: 200px;
 }
 
 /* Activity Logs */
@@ -494,50 +542,6 @@ collab-graph {
 .btn-action:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-
-.task-check {
-  width: 20px;
-  height: 20px;
-  border: 2px solid var(--border);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--success);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 700;
-  font-size: 12px;
-  cursor: pointer;
-  padding: 0;
-}
-
-.task-check.checked {
-  background: rgba(16, 185, 129, 0.2);
-  border-color: var(--success);
-}
-
-.badge-status-todo {
-  background: rgba(148, 163, 184, 0.2);
-  color: #cbd5e1;
-  border: 1px solid #64748b;
-}
-
-.badge-status-doing {
-  background: rgba(245, 158, 11, 0.2);
-  color: var(--warning);
-  border: 1px solid var(--warning);
-}
-
-.badge-status-done {
-  background: rgba(16, 185, 129, 0.2);
-  color: var(--success);
-  border: 1px solid var(--success);
-}
-
-.card.done {
-  opacity: 0.75;
-  border-color: rgba(16, 185, 129, 0.3);
 }
 
 /* Multi-Workspace Switcher Toolbar */

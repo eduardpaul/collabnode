@@ -1,13 +1,23 @@
 import { tool as createLangChainTool, type StructuredToolInterface } from "@langchain/core/tools";
 import { buildTools, type BoundTool } from "@collabnode/mcp";
 import type { CollabSession } from "@collabnode/runtime";
-import { resolveNodeAccess, type AgentDef, type GraphSchema, type ToolsPolicyDef } from "@collabnode/schema";
+import {
+  resolveNodeAccess,
+  toolListAllowsAll,
+  type AgentDef,
+  type GraphSchema,
+  type ToolsPolicyDef,
+  type ViewDef,
+} from "@collabnode/schema";
+import { toolParametersJsonSchema } from "./structured.js";
 import type { ToolCallEvent } from "./types.js";
 
 export interface BindAgentToolsOptions {
   session: CollabSession;
   schema: GraphSchema;
   toolsPolicy?: ToolsPolicyDef;
+  /** Named graph slices from the workspace type, exposed as `view_<name>` tools. */
+  views?: Record<string, ViewDef>;
   agentDef?: AgentDef;
   actorId?: string;
   language?: string;
@@ -29,49 +39,14 @@ function shouldIncludeTool(
     return false;
   }
 
-  if (agentDef?.tools && agentDef.tools.length > 0) {
-    return agentDef.tools.includes(tool.name);
+  // `*` is the documented wildcard for "every tool that survived the policy", so
+  // it has to be honoured here too — a literal `includes("*")` test would drop
+  // every tool for an agent that spelled its allowlist out as `tools: ["*"]`.
+  if (!toolListAllowsAll(agentDef?.tools)) {
+    return agentDef!.tools!.includes(tool.name);
   }
 
   return true;
-}
-
-import { z } from "zod";
-
-function cleanJsonSchema(schema: unknown): Record<string, unknown> {
-  let converted: Record<string, unknown>;
-  try {
-    converted = z.toJSONSchema(schema as z.ZodTypeAny, {
-      target: "draft-7",
-      unrepresentable: "any",
-    }) as Record<string, unknown>;
-  } catch {
-    converted = { type: "object", properties: {} };
-  }
-
-  function clean(obj: any) {
-    if (!obj || typeof obj !== "object") return;
-    delete obj.$schema;
-    delete obj.$id;
-    delete obj.propertyNames;
-    delete obj.patternProperties;
-    if ("const" in obj) {
-      obj.enum = [obj.const];
-      delete obj.const;
-    }
-    if (obj.properties && typeof obj.properties === "object") {
-      for (const val of Object.values(obj.properties)) {
-        clean(val);
-      }
-    }
-    if (obj.items) clean(obj.items);
-    if (Array.isArray(obj.allOf)) obj.allOf.forEach(clean);
-    if (Array.isArray(obj.anyOf)) obj.anyOf.forEach(clean);
-    if (Array.isArray(obj.oneOf)) obj.oneOf.forEach(clean);
-  }
-
-  clean(converted);
-  return converted;
 }
 
 /**
@@ -83,6 +58,7 @@ export function bindAgentTools(options: BindAgentToolsOptions): StructuredToolIn
     session,
     schema,
     toolsPolicy,
+    views,
     agentDef,
     actorId = agentDef?.actorId ?? session.actorId ?? "agent",
     language = "en",
@@ -106,6 +82,7 @@ export function bindAgentTools(options: BindAgentToolsOptions): StructuredToolIn
     language,
     graphKind: "memory",
     policy: toolsPolicy,
+    views,
     agentRole: agentDef?.role,
   });
 
@@ -141,7 +118,10 @@ export function bindAgentTools(options: BindAgentToolsOptions): StructuredToolIn
       {
         name: rawTool.name,
         description: rawTool.description,
-        schema: cleanJsonSchema(rawTool.inputSchema) as any,
+        schema: toolParametersJsonSchema(rawTool.inputSchema) as any,
+        // Carry the schema's own read/write annotation through, so callers can
+        // tell a query from a mutation without pattern-matching tool names.
+        metadata: { readOnly: rawTool.annotations?.readOnlyHint === true },
       },
     );
 

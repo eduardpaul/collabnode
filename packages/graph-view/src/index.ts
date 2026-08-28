@@ -1,6 +1,6 @@
 import type { GraphSnapshot } from "@collabnode/graph";
-import type { CollabSession } from "@collabnode/runtime";
-import { resolveI18nString } from "@collabnode/schema";
+import { resolveView, type CollabSession } from "@collabnode/runtime";
+import { resolveI18nString, type ViewDef } from "@collabnode/schema";
 import { DataSet, Network, type VisClickParams, type VisDataset, type VisNetwork } from "./view/vis.js";
 import {
   changedEntityIds,
@@ -79,6 +79,7 @@ export class CollabGraph extends HTMLElement {
   #previous: GraphSnapshot | undefined;
   #projected = new Map<string, ViewNode>();
   #filters: ViewFilters = emptyFilters();
+  #view: { def: ViewDef; params?: Record<string, unknown>; name?: string } | undefined;
   #mode: GraphMode = { kind: "idle" };
   #seeded = false;
   #searchTimer: number | undefined;
@@ -94,7 +95,61 @@ export class CollabGraph extends HTMLElement {
       visibleNodeTypes: this.#filters.visibleNodeTypes
         ? new Set(this.#filters.visibleNodeTypes)
         : undefined,
+      visibleNodeIds: this.#filters.visibleNodeIds
+        ? new Set(this.#filters.visibleNodeIds)
+        : undefined,
     };
+  }
+
+  /**
+   * Show exactly the slice one named view selects.
+   *
+   * The same `views:` declaration that generates an agent's `view_<name>` tool
+   * drives the panel, so what a person sees and what the agent reasons about
+   * cannot drift apart. Set `undefined` to drop back to the type filters.
+   *
+   * Unlike `visible-types` this cannot be an attribute — a view is an object
+   * with parameters, not a string — so it is a property.
+   */
+  set view(value: { def: ViewDef; params?: Record<string, unknown>; name?: string } | undefined) {
+    this.#view = value;
+    if (value) {
+      this.#applyView();
+    } else {
+      // Dropping the view has to drop the id allowlist it installed, or the
+      // graph stays restricted to a slice nothing is asking for any more.
+      this.#filters = patchFilters(this.#filters, { visibleNodeIds: undefined });
+    }
+    this.#paint();
+  }
+
+  get view(): { def: ViewDef; params?: Record<string, unknown>; name?: string } | undefined {
+    return this.#view;
+  }
+
+  /**
+   * Re-resolves the bound view against the current snapshot. Called on every
+   * paint, because a view is a live query: a node the user edits into or out of
+   * the selection has to appear or leave without the caller re-setting `view`.
+   */
+  #applyView(): void {
+    if (!this.#view || !this.#session) {
+      return;
+    }
+    try {
+      const resolved = resolveView(
+        this.#session.snapshot(),
+        this.#view.def,
+        this.#view.params ?? {},
+        { name: this.#view.name, schema: this.#session.schema },
+      );
+      this.#filters = patchFilters(this.#filters, {
+        visibleNodeIds: new Set(resolved.nodes.map((node) => node.id)),
+      });
+    } catch {
+      // A view missing a required parameter is a normal intermediate UI state,
+      // not a reason to blank the graph — leave the previous selection standing.
+    }
   }
 
   set filters(value: Partial<ViewFilters>) {
@@ -328,6 +383,7 @@ export class CollabGraph extends HTMLElement {
     if (!session || !snap || !this.#nodes || !this.#edges) {
       return;
     }
+    this.#applyView();
     const projected = projectGraph(session.schema, snap, this.#filters);
     const plan = planApply(this.#nodeIds, this.#edgeIds, projected);
     if (plan.nodesAdd.length) {

@@ -148,6 +148,7 @@ schema:
 tools:
   expose:
     - *
+  advanced: [graph_query]
   named:
     add_item:
       description: "Add a retro item directly into a column"
@@ -175,6 +176,12 @@ tools:
 
     expect(toolNames).toContain("graph_search");
     expect(toolNames).toContain("graph_query");
+    // `expose: *` means every *generated* tool, and the advanced ones are not
+    // generated unless named: this fixture asked for graph_query and not the
+    // other three, so the wildcard must not smuggle them back in.
+    expect(toolNames).not.toContain("graph_snapshot");
+    expect(toolNames).not.toContain("graph_diff_since");
+    expect(toolNames).not.toContain("graph_apply_batch");
     expect(toolNames).toContain("graph_delete_node");
     expect(toolNames).toContain("upsert_node_Column");
     expect(toolNames).toContain("upsert_node_Item");

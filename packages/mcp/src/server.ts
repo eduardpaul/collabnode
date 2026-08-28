@@ -176,6 +176,7 @@ export function createWorkspaceMcpServer(
   registerSessionTools(schema, session, server, {
     graphKind: options.graphKind ?? "memory",
     policy: type?.tools,
+    views: type?.views,
     agentRole: options.agentRole,
     language: defaultLanguage,
     access,

@@ -514,8 +514,9 @@ another.
 Schema-derived tools are already the right instinct. The workspace type extends
 it with:
 
-- **`expose`** — which generic graph tools are available (a retro does not need
-  `graph_query`),
+- **`expose`** — which generated graph / upsert tools are available (a retro
+  does not need `graph_query`). `*` exposes every generated tool, which is also
+  the default when the list is omitted,
 - **`named`** — type-specific tools: `add_item(column, body)` rather than
   `upsert_node(type="Item", ...)`. Named, narrow tools measurably outperform
   generic ones for tool-use accuracy, and the schema already has the type

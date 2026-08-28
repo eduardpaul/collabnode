@@ -4,13 +4,19 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "check:types": "collabnode types workspaces/solution-planner.yaml -o src/workspace.types.ts --name SolutionPlanner --check",
     "dev": "node --experimental-strip-types src/server.ts",
+    "gen:types": "collabnode types workspaces/solution-planner.yaml -o src/workspace.types.ts --name SolutionPlanner",
+    "predev": "npm run gen:types",
+    "prestart": "npm run gen:types",
+    "pretest": "npm run gen:types",
     "start": "node --experimental-strip-types src/server.ts",
-    "test": "node --experimental-strip-types src/test.ts && node --experimental-strip-types src/test-revise-usability.ts && node --experimental-strip-types src/test-architect-tools.ts",
+    "test": "node --experimental-strip-types src/test.ts && node --experimental-strip-types src/test-architect-tools.ts",
     "test:llm": "node --experimental-strip-types src/test-llm-planner.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@collabnode/cli": "workspace:*",
     "@collabnode/deepagents": "workspace:*",
     "@collabnode/graph-view": "workspace:*",
     "@collabnode/react": "workspace:*",
@@ -36,7 +42,7 @@
     "@types/node": "^22.12.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^4.3.4",
+    "@vitejs/plugin-react": "^6.1.1",
     "typescript": "^6.0.3"
   }
 }

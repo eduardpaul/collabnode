@@ -1,9 +1,14 @@
 export type {
+  AnyGraph,
+  AnySnapshot,
+  EdgeLike,
+  NodeLike,
   EntityMeta,
   GraphEdgeRecord,
   GraphNodeRecord,
   GraphOp,
   GraphSnapshot,
+  GraphTypeMap,
   HistoryEntry,
   HistoryFieldDiff,
   HistoryFilter,
@@ -56,3 +61,15 @@ export { InMemoryGraphStore } from "./memory.js";
 export type { InMemoryGraphStoreOptions } from "./memory.js";
 export { runMinimalQuery } from "./query.js";
 export { walk, type WalkDirection, type WalkHop, type WalkOptions, type WalkResult } from "./walk.js";
+export {
+  edgesOfType,
+  findOfType,
+  ofType,
+  nodeOfType,
+  nodesOfType,
+  nodesOfTypes,
+  singletonOfType,
+  type EdgeOf,
+  type NodeOf,
+  type Typed,
+} from "./select.js";

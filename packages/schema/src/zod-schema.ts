@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { PROPERTY_TYPE_NAMES, PROPERTY_WIDGETS } from "./types.js";
+import { ADVANCED_TOOLS, PROPERTY_TYPE_NAMES, PROPERTY_WIDGETS } from "./types.js";
 
 const i18nString = z.union([z.string(), z.record(z.string(), z.string())]);
 const i18nStringList = z.union([
@@ -399,6 +399,36 @@ export const rawLifecycle = z.strictObject({
   endWhen: z.string().optional(),
 });
 
+export const rawViewRoots = z.strictObject({
+  types: z.array(z.string().min(1)).optional(),
+  where: z.string().optional(),
+});
+
+export const rawViewTraverse = z.strictObject({
+  edges: z.array(z.string().min(1)).optional(),
+  direction: z.enum(["in", "out", "both"]).optional(),
+  depth: z.number().int().positive().optional(),
+  where: z.string().optional(),
+});
+
+export const rawViewSelect = z.strictObject({
+  roots: rawViewRoots.optional(),
+  traverse: rawViewTraverse.optional(),
+  include: z.array(z.string().min(1)).optional(),
+});
+
+export const rawViewDef = z.strictObject({
+  title: i18nString.optional(),
+  description: i18nString.optional(),
+  guidance: i18nStringList.optional(),
+  params: z.record(z.string().min(1), rawParamDef).optional(),
+  select: rawViewSelect.optional(),
+  fields: z.record(z.string().min(1), z.array(z.string().min(1))).optional(),
+  edges: z.boolean().optional(),
+  maxNodes: z.number().int().positive().optional(),
+  format: z.enum(["markdown", "json"]).optional(),
+});
+
 export const rawNamedTool = z.strictObject({
   description: i18nString.optional(),
   creates: z.string().optional(),
@@ -418,12 +448,14 @@ export const rawAgent = z.strictObject({
   description: i18nString.optional(),
   systemPrompt: i18nString.optional(),
   tools: z.array(z.string()).optional(),
+  views: z.array(z.string()).optional(),
   nodes: rawAgentNodes.optional(),
   internalPlanning: z.boolean().optional(),
 });
 
 export const rawTools = z.strictObject({
   expose: z.array(z.string()).optional(),
+  advanced: z.array(z.enum(ADVANCED_TOOLS)).optional(),
   named: z.record(z.string(), rawNamedTool).optional(),
   agents: z.array(rawAgent).optional(),
 });
@@ -455,6 +487,7 @@ export const rawWorkspaceType = z.strictObject({
   template: rawTemplate.optional(),
   lifecycle: rawLifecycle.optional(),
   tools: rawTools.optional(),
+  views: z.record(z.string().min(1), rawViewDef).optional(),
   projection: z.enum(["none", "memory", "shared"]).optional(),
   retention: rawRetention.optional(),
 });

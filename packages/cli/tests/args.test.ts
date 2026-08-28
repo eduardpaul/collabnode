@@ -79,3 +79,44 @@ describe("parseArgs", () => {
     expect(args.actor).toBe("agent-1");
   });
 });
+
+describe("parseArgs types command", () => {
+  it("parses the generation flags", () => {
+    const args = parseArgs([
+      "node",
+      "collabnode",
+      "types",
+      "workspace.yaml",
+      "-o",
+      "src/workspace.types.ts",
+      "--name",
+      "MyBoard",
+      "--full",
+      "--watch",
+    ]);
+    expect(args.command).toBe("types");
+    expect(args.schemaPath).toBe("workspace.yaml");
+    expect(args.out).toBe("src/workspace.types.ts");
+    expect(args.typeName).toBe("MyBoard");
+    expect(args.full).toBe(true);
+    expect(args.watch).toBe(true);
+    expect(args.check).toBeUndefined();
+  });
+
+  it("treats a prototype key as a positional argument, not a flag", () => {
+    // `VALUE_FLAGS[token]` finds `Object.prototype.constructor` for a schema
+    // file literally named `constructor`, and `__proto__` for one named that.
+    for (const name of ["constructor", "__proto__", "toString"]) {
+      const args = parseArgs(["node", "collabnode", "types", name]);
+      expect(args.schemaPath).toBe(name);
+      expect(args.command).toBe("types");
+    }
+  });
+
+  it("parses --check on its own", () => {
+    const args = parseArgs(["node", "collabnode", "types", "w.yaml", "--check", "--out", "t.ts"]);
+    expect(args.check).toBe(true);
+    expect(args.out).toBe("t.ts");
+    expect(args.full).toBeUndefined();
+  });
+});
