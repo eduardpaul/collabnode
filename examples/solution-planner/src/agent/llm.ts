@@ -6,11 +6,10 @@ import type { PlannerLanguage } from "./types.ts";
 /**
  * Which model this app talks to, and how it guesses the user's language.
  *
- * The structured-output machinery this used to hold — the tool loop, the
- * provider schema sanitising, `invokeStructured` — moved to
- * `@collabnode/deepagents`, which is where the tools it filters are built. What
- * is left is genuinely this app's: its credentials, its deployment names, its
- * two languages.
+ * Chat-model construction for this app. Structured output is the single-shot
+ * helper on `@collabnode/deepagents`; tools and the ReAct loop are Deep Agents.
+ * What is left here is genuinely this app's: its credentials, its deployment
+ * names, its two languages.
  */
 
 /**

@@ -1,15 +1,14 @@
 import { tool as createLangChainTool, type StructuredToolInterface } from "@langchain/core/tools";
-import { buildTools, type BoundTool } from "@collabnode/mcp";
+import { buildTools, toolJsonSchema, type BoundTool } from "@collabnode/mcp";
 import type { CollabSession } from "@collabnode/runtime";
 import {
-  resolveNodeAccess,
   toolListAllowsAll,
   type AgentDef,
   type GraphSchema,
   type ToolsPolicyDef,
   type ViewDef,
 } from "@collabnode/schema";
-import { toolParametersJsonSchema } from "./structured.js";
+import { toProviderJsonSchema } from "./structured.js";
 import type { ToolCallEvent } from "./types.js";
 
 export interface BindAgentToolsOptions {
@@ -75,8 +74,6 @@ export function bindAgentTools(options: BindAgentToolsOptions): StructuredToolIn
       ? session.runAs(actorId)
       : session;
 
-  const access = resolveNodeAccess(schema, { agents: agentDef ? [agentDef] : [] }, agentDef?.role);
-
   // Generate all tools supported by the schema for this session and role
   const rawTools = buildTools(boundSession.schema, boundSession, {
     language,
@@ -118,9 +115,9 @@ export function bindAgentTools(options: BindAgentToolsOptions): StructuredToolIn
       {
         name: rawTool.name,
         description: rawTool.description,
-        schema: toolParametersJsonSchema(rawTool.inputSchema) as any,
-        // Carry the schema's own read/write annotation through, so callers can
-        // tell a query from a mutation without pattern-matching tool names.
+        // `toolJsonSchema` puts the YAML `required: true` flags back on upserts;
+        // `toProviderJsonSchema` then strips what Gemini/Azure reject.
+        schema: toProviderJsonSchema(toolJsonSchema(rawTool, schema)),
         metadata: { readOnly: rawTool.annotations?.readOnlyHint === true },
       },
     );

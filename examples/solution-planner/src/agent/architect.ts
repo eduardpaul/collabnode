@@ -2,10 +2,8 @@ import { edgesOfType, nodesOfType, ofType, type PlannerSession } from "./session
 import { snapshotToMarkdown } from "collabnode";
 import type { PlannerState, AgentLog } from "./types.ts";
 import { getChatModel } from "./llm.ts";
-import { invokeStructured, readOnlyTools, type ToolEvent } from "@collabnode/deepagents";
-import { sharedMicrosoftLearnTools } from "./microsoft-learn.ts";
+import { invokeStructured } from "@collabnode/deepagents";
 import { dirtyNodes, formatRevisionContext, formatUserReviewGuidance } from "./dirty.ts";
-import { formatTaskDescription } from "./schemas.ts";
 import {
   applyPlan,
   emptyPlan,
@@ -26,18 +24,10 @@ const ARCHITECT_STAMP = {
   Risk: { category: "technical" },
 } satisfies ApplyPlanOptions["stamp"];
 
-function formatToolEvent(event: ToolEvent, isEs: boolean): string {
-  const args = event.args && typeof event.args === "object" ? event.args : {};
-  const hint =
-    typeof (args as { query?: unknown }).query === "string"
-      ? (args as { query: string }).query
-      : typeof (args as { url?: unknown }).url === "string"
-        ? (args as { url: string }).url
-        : JSON.stringify(args);
-  const clipped = hint.length > 120 ? `${hint.slice(0, 117)}...` : hint;
-  return `📚 Microsoft Learn (${event.name}): ${clipped}`;
-}
-
+/**
+ * One structured call for this role's nodes. Graph context is in the prompt;
+ * tools belong on a Deep Agent, not on this helper.
+ */
 async function invokeArchitectStructured<T extends z.ZodTypeAny>(
   session: PlannerSession,
   model: NonNullable<ReturnType<typeof getChatModel>>,
@@ -45,41 +35,18 @@ async function invokeArchitectStructured<T extends z.ZodTypeAny>(
   prompt: string,
   name: string,
   isEs: boolean,
-  logMessage: (text: string) => void,
 ): Promise<z.infer<T>> {
   const workspaceType = await getPlannerWorkspaceType();
-  const learn = await sharedMicrosoftLearnTools();
-
-  if (learn.tools.length > 0) {
-    logMessage(
-      isEs
-        ? `Conectado a ${learn.serverName || "Microsoft Learn MCP"} (${learn.tools.length} herramientas).`
-        : `Connected to ${learn.serverName || "Microsoft Learn MCP"} (${learn.tools.length} tools).`,
-    );
-  }
-
   const agentConfig = getDeepAgentConfig({
-    // Agent tools are built from the runtime schema, so this API serves any
-    // workspace and takes the untyped session.
     session: session.as(),
     workspaceType,
     role: "architect",
     language: isEs ? "es" : "en",
-    extraTools: learn.tools,
-    systemPromptSuffix: learn.instructions,
     model,
-    onToolCall: (event) => {
-      logMessage(`🔧 [architect] ${event.name}: ${JSON.stringify(event.args)}`);
-    },
   });
 
-  return await invokeStructured(model, schema, prompt, name, {
-    // Read the graph and the docs while thinking; the plan itself is written
-    // once, atomically, from the structured result.
-    tools: readOnlyTools(agentConfig.tools),
+  return invokeStructured(model, schema, prompt, name, {
     system: agentConfig.systemPrompt,
-    maxToolRounds: 3,
-    onToolEvent: (event) => logMessage(formatToolEvent(event, isEs)),
   });
 }
 
@@ -137,8 +104,6 @@ async function runArchitectTurn(
 
 ${contextMarkdown}
 
-Usa las herramientas de Microsoft Learn mientras trabajas si aplica guía de Microsoft/Azure.
-
 Devuelve un plan de nodos y aristas:
 1. Modelo C4 completo, un nodo C4DiagramElement por elemento. Un diagrama de contenedores por sí solo NO es un modelo C4: incluye al menos un Person, un Boundary para el sistema que se diseña, un System (external:true) por cada sistema de terceros, y Components dentro del Container con más lógica.
    El anidamiento es la arista CONTAINS (del contenedor al contenido) y las llamadas son la arista USES.
@@ -153,8 +118,6 @@ Los extremos de las aristas son ids del grafo de arriba o refs de este mismo pla
         : `You are an AI Software Architect. Review the business scope and features defined for this solution:
 
 ${contextMarkdown}
-
-Use Microsoft Learn tools while you work when Microsoft/Azure guidance applies.
 
 Return a plan of nodes and edges:
 1. A complete C4 model, one C4DiagramElement node per element. A container diagram alone is NOT a C4 model: include at least one Person, one Boundary for the system being designed, a System (external:true) per third-party system, and Components inside the Container carrying the most logic.
@@ -175,7 +138,6 @@ Edge endpoints are ids from the graph above or refs from this same plan. Never t
         prompt,
         "architect_plan",
         isEs,
-        logMessage,
       );
       if (plan.review?.trim()) {
         logMessage(plan.review.trim());
@@ -339,7 +301,7 @@ async function runArchitectRevise(
     try {
       const schema = await plannerPlanSchema("architect", isEs ? "es" : "en");
       const prompt = isEs
-        ? `Eres un Arquitecto de Software (AI Architect). El usuario cambió nodos del plan. Revisa SOLO los nodos sucios y sus relaciones; adapta C4, tareas (puntos + 4 ejes, descripción con Qué y Cómo) y riesgos técnicos. No regeneres toda la arquitectura. Usa Microsoft Learn si el cambio toca servicios Microsoft/Azure.
+        ? `Eres un Arquitecto de Software (AI Architect). El usuario cambió nodos del plan. Revisa SOLO los nodos sucios y sus relaciones; adapta C4, tareas (puntos + 4 ejes, descripción con Qué y Cómo) y riesgos técnicos. No regeneres toda la arquitectura.
 
 Grafo actual:
 ${graphMarkdown}
@@ -353,7 +315,7 @@ Reglas:
 - Para mover algo que ya existe, pon el id de la arista vieja en "removeEdges" y añade la nueva en "edges".
 - Person / System / Boundary / Container / Component son tipos distintos. Boundary es solo agrupación; System es software. external:true se dibuja como Person_Ext / System_Ext / Container_Ext.
 - agrees: true si la arquitectura revisada te parece completa.${formatUserReviewGuidance(state.reviewMessage, true)}`
-        : `You are an AI Software Architect. The user changed nodes in the plan. Review ONLY the dirty nodes and their relationships; adapt C4, tasks (points + 4 axes, description with What and How), and technical risks. Do not regenerate the whole architecture. Use Microsoft Learn if the change touches Microsoft/Azure services.
+        : `You are an AI Software Architect. The user changed nodes in the plan. Review ONLY the dirty nodes and their relationships; adapt C4, tasks (points + 4 axes, description with What and How), and technical risks. Do not regenerate the whole architecture.
 
 Current graph:
 ${graphMarkdown}
@@ -375,7 +337,6 @@ Rules:
         prompt,
         "architect_revision",
         isEs,
-        logMessage,
       );
       if (plan.review?.trim()) {
         logMessage(plan.review.trim());

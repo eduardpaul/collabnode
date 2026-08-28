@@ -39,6 +39,14 @@ schema:
       to: [Task]
       directed: true
 
+views:
+  goals:
+    title:
+      en: Goals
+    select:
+      roots:
+        types: [Goal]
+
 tools:
   expose:
     - upsert_node_Goal
@@ -58,6 +66,7 @@ tools:
         - upsert_node_Goal
         - graph_get
         - graph_list
+        - view_goals
       nodes:
         readOnly: [Task]
 
@@ -182,6 +191,10 @@ describe("@collabnode/deepagents configuration provider", () => {
     expect(extra).toEqual([]);
     expect(subagent.tools.map((t) => t.name)).not.toContain("upsert_node_Task");
     expect(subagent.tools.map((t) => t.name)).not.toContain("upsert_edge_HAS_TASK");
+    // Views are part of that same policy: a subagent that omitted `views`
+    // used to ship without `view_*` tools the parent was granted.
+    expect(parent.tools.map((t) => t.name)).toContain("view_goals");
+    expect(subagent.tools.map((t) => t.name)).toContain("view_goals");
   });
 
   it("marks each graph tool read-only or not, from the schema's own annotation", async () => {

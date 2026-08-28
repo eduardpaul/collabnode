@@ -2,8 +2,24 @@ import type { BaseChatModel } from "@langchain/core/language_models/chat_models"
 import type { StructuredToolInterface } from "@langchain/core/tools";
 import type { CollabSession } from "@collabnode/runtime";
 import type { AgentDef, GraphSchema, WorkspaceType } from "@collabnode/schema";
+import type { createDeepAgent, SubAgent } from "deepagents";
 
 export type SupportedLanguage = "en" | "es" | string;
+
+type DeepAgentInit = Pick<
+  NonNullable<Parameters<typeof createDeepAgent>[0]>,
+  | "model"
+  | "tools"
+  | "systemPrompt"
+  | "middleware"
+  | "subagents"
+  | "interruptOn"
+  | "backend"
+  | "checkpointer"
+  | "store"
+>;
+
+export type DeepAgentMiddleware = NonNullable<DeepAgentInit["middleware"]>[number];
 
 export interface ToolCallEvent {
   name: string;
@@ -33,7 +49,7 @@ export interface DeepAgentConfigOptions {
   /** Tool names to exclude from the agent's tool surface. */
   excludedTools?: string[];
   /** Additional LangChain / DeepAgents middleware. */
-  extraMiddleware?: any[];
+  extraMiddleware?: DeepAgentMiddleware[];
   /** Custom suffix appended to the assembled system prompt. */
   systemPromptSuffix?: string;
   /** Complete override for the system prompt (bypasses schema generation). */
@@ -44,33 +60,36 @@ export interface DeepAgentConfigOptions {
    */
   internalPlanning?: boolean;
   /** Human-in-the-loop interrupt configuration. */
-  interruptOn?: Record<string, boolean | { allowedDecisions?: string[] }>;
+  interruptOn?: DeepAgentInit["interruptOn"];
   /** Custom filesystem backend (defaults to StateBackend in deepagents). */
-  backend?: any;
+  backend?: DeepAgentInit["backend"];
   /** Checkpointer for persistence and human-in-the-loop support. */
-  checkpointer?: any;
+  checkpointer?: DeepAgentInit["checkpointer"];
   /** Durable cross-thread store. */
-  store?: any;
+  store?: DeepAgentInit["store"];
   /** Subagent configurations to attach. */
-  subagents?: any[];
+  subagents?: DeepAgentInit["subagents"];
   /** Optional callback invoked on every tool execution for logging and observability. */
   onToolCall?: (event: ToolCallEvent) => void;
 }
 
 /**
- * The configuration object prepared by Collabnode, directly consumable by `createDeepAgent(config)`
- * or customizable by the caller before agent creation.
+ * Ready for `createDeepAgent`, plus the Collabnode fields that helper does not take.
+ *
+ * Pass the result through `createWorkspaceDeepAgent`, or pick the Deep Agent
+ * keys yourself. `actorId` / `role` / `language` / `agentDef` stay here so a
+ * caller can inspect them; they are not part of `createDeepAgent`'s contract.
  */
 export interface CollabDeepAgentConfig {
-  model?: BaseChatModel | string;
+  model?: DeepAgentInit["model"];
   systemPrompt: string;
   tools: StructuredToolInterface[];
-  middleware?: any[];
-  interruptOn?: Record<string, any>;
-  subagents?: any[];
-  backend?: any;
-  checkpointer?: any;
-  store?: any;
+  middleware?: DeepAgentMiddleware[];
+  interruptOn?: DeepAgentInit["interruptOn"];
+  subagents?: DeepAgentInit["subagents"];
+  backend?: DeepAgentInit["backend"];
+  checkpointer?: DeepAgentInit["checkpointer"];
+  store?: DeepAgentInit["store"];
   actorId: string;
   role?: string;
   language: string;
@@ -96,5 +115,5 @@ export interface CollabSubAgentConfig {
   systemPrompt: string;
   tools: StructuredToolInterface[];
   model?: BaseChatModel | string;
-  interruptOn?: Record<string, any>;
+  interruptOn?: SubAgent["interruptOn"];
 }

@@ -2,7 +2,7 @@ import { snapshotToMarkdown } from "collabnode";
 import { findOfType, nodesOfType, ofType, type PlannerSession } from "./session.ts";
 import type { PlannerState, AgentLog } from "./types.ts";
 import { getChatModel } from "./llm.ts";
-import { invokeStructured, readOnlyTools } from "@collabnode/deepagents";
+import { invokeStructured } from "@collabnode/deepagents";
 import { dirtyNodes, formatRevisionContext, formatUserReviewGuidance } from "./dirty.ts";
 import {
   applyPlan,
@@ -63,16 +63,11 @@ async function runManagerTurn(
   };
 
   const agentConfig = getDeepAgentConfig({
-    // Agent tools are built from the runtime schema, so this API serves any
-    // workspace and takes the untyped session.
     session: session.as(),
     workspaceType,
     role: "manager",
     language: isEs ? "es" : "en",
     model: model ?? undefined,
-    onToolCall: (event) => {
-      logMessage(`🔧 [manager] ${event.name}: ${JSON.stringify(event.args)}`);
-    },
   });
 
   logMessage(
@@ -104,10 +99,6 @@ Description: "${state.description}"`;
 
       const parsed = await invokeStructured(model, schema, prompt, "manager_plan", {
         system: agentConfig.systemPrompt,
-        // Read-only while composing: the plan is written once by applyPlan.
-        tools: readOnlyTools(agentConfig.tools),
-        maxToolRounds: 2,
-        onToolEvent: (event) => logMessage(`🔧 [manager] ${event.name}`),
       });
       plan = parsed;
       if (iteration !== 1) {
@@ -263,16 +254,11 @@ async function runManagerRevise(
 
   const workspaceType = await getPlannerWorkspaceType();
   const agentConfig = getDeepAgentConfig({
-    // Agent tools are built from the runtime schema, so this API serves any
-    // workspace and takes the untyped session.
     session: session.as(),
     workspaceType,
     role: "manager",
     language: isEs ? "es" : "en",
     model: model ?? undefined,
-    onToolCall: (event) => {
-      logMessage(`🔧 [manager] ${event.name}: ${JSON.stringify(event.args)}`);
-    },
   });
 
   if (model) {
@@ -310,10 +296,6 @@ Rules:
 
       const parsed = await invokeStructured(model, schema, prompt, "manager_revision", {
         system: agentConfig.systemPrompt,
-        // Read-only while composing: applyPlan is the single write.
-        tools: readOnlyTools(agentConfig.tools),
-        maxToolRounds: 2,
-        onToolEvent: (event) => logMessage(`🔧 [manager] ${event.name}`),
       });
       plan = parsed;
       if (plan.review?.trim()) {

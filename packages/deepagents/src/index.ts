@@ -3,6 +3,7 @@ export {
   createSubAgentConfig,
   createWorkspaceDeepAgent,
   findAgentDef,
+  toCreateDeepAgentParams,
 } from "./config.js";
 
 export {
@@ -24,13 +25,11 @@ export {
 
 export {
   invokeStructured,
-  runToolCallingLoop,
-  summarizeToolTranscript,
   readOnlyTools,
   toBindableTools,
   sanitizeJsonSchema,
+  toProviderJsonSchema,
   toolParametersJsonSchema,
-  type ToolEvent,
   type StructuredInvokeOptions,
 } from "./structured.js";
 

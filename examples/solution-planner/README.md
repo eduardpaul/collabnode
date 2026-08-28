@@ -9,7 +9,7 @@ A minimalist, YAGNI-focused real-time collaborative application demonstrating **
 - **Real-Time Collaboration**: Powered by `collabnode` CRDT runtime (`CollabSession`) with Fluid Framework relay & Redis/Memory registry.
 - **Multi-Agent Cyclic Workflow (LangChain 1.x / LangGraph 1.x)**:
   - **AI Manager**: Responsible for business Epics, Features, Business Risks, and raising strategic Assumptions.
-  - **AI Architect**: Reads Manager's scope, consults [Microsoft Learn MCP](https://learn.microsoft.com/api/mcp) while working (`microsoft_docs_search`, `microsoft_docs_fetch`, `microsoft_code_sample_search`), then generates C4 as **C4DiagramElement** nodes whose `type` is Person, System, Boundary, Container, or Component (`external: true` renders as Mermaid `_Ext`) and decomposes work into Tasks.
+  - **AI Architect**: Reads Manager's scope, then generates C4 as **C4DiagramElement** nodes whose `type` is Person, System, Boundary, Container, or Component (`external: true` renders as Mermaid `_Ext`) and decomposes work into Tasks. Graph context is in the prompt; each turn is one structured-output call (`invokeStructured`), not a Deep Agents tool loop.
   - **Consensus Loop**: Agents take turns mutating shared state until both agree (`managerAgrees && architectAgrees`).
 - **Dirty nodes + on-demand revision**: Human edits mark nodes `dirty` (an Epic dirties its Features and Tasks). **Revise dirty nodes** re-runs the Manager ↔ Architect loop against that subgraph so they adapt the plan and raise risks, then clear the flags. You can attach an optional **review note** so the crew has extra context for the change.
 - **Human-In-The-Loop (HITL)**: When either agent flags a critical assumption, LangGraph pauses execution (`waiting_user_validation`) and waits for human approval or rejection via the UI before resuming.
@@ -24,7 +24,7 @@ A minimalist, YAGNI-focused real-time collaborative application demonstrating **
 - **First-Class React Integration**: Built with `@collabnode/react` hooks (`useCollab`, `useCollabSnapshot`, `useCollabNodes`, etc.).
 - **Live Graph Canvas**: Embedded `<collab-graph>` from `@collabnode/graph-view`. The sample also has a local `<collab-mermaid>` that turns planner nodes into Mermaid DSL and renders them with mermaid.js — C4 containers each have their own node, and the C4 diagram is assembled from those nodes.
 - **Bilingual (English & Spanish)**: Full UI toggle and automatic language detection for agent responses.
-- **Microsoft Learn grounding**: When an LLM is configured, the Architect runs a tool-calling loop against Microsoft Learn MCP *before* structured output (a single `withStructuredOutput` call cannot mix tools). Disable with `MICROSOFT_LEARN_MCP=0`.
+- **Structured output vs Deep Agents**: Asking a role for specific nodes (requirements → Epics and Features) is `invokeStructured` — one shot, schema-enforced, no tool loop. Graph tools and MCP extras belong on `createWorkspaceDeepAgent` / `getDeepAgentConfig`. Microsoft Learn MCP still loads in tests (`MICROSOFT_LEARN_MCP=0` to disable) so the wiring stays proven; the planner's LLM turns do not call it.
 - **Zero-API-Key Local DX**: Runs seamlessly out of the box with deterministic simulation, or with real LLMs (`OPENAI_API_KEY`, `GEMINI_API_KEY`).
 
 ---
@@ -45,15 +45,15 @@ Open [http://127.0.0.1:4180](http://127.0.0.1:4180) in your browser.
 pnpm --filter @collabnode/example-solution-planner test
 ```
 
-That runs the planner consensus tests, a functional usability journey (edit a dirty Epic, attach a review note, assert the Manager ↔ Architect loop uses it), and the Architect's Microsoft Learn MCP tool-calling loop.
+That runs the planner consensus tests, a functional usability journey (edit a dirty Epic, attach a review note, assert the Manager ↔ Architect loop uses it), and Microsoft Learn MCP client wiring.
 
-Live Foundry + Microsoft Learn (requires `.env` credentials and `MICROSOFT_LEARN_MCP=1`):
+Live Foundry (requires `.env` credentials):
 
 ```bash
 pnpm --filter @collabnode/example-solution-planner test:llm
 ```
 
-That fails if the LLM is missing, Learn MCP tools do not load, or the Architect produces a plan without calling Microsoft Learn tools.
+That fails if the LLM is missing or the Manager/Architect cannot produce a schema-checked plan. Learn MCP is still required to load (`MICROSOFT_LEARN_MCP=1`) as a connectivity check; it is not invoked during the structured-output turns.
 
 ### 3. Change the schema
 

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { StructuredToolInterface } from "@langchain/core/tools";
 import { z } from "zod";
@@ -7,26 +7,28 @@ import {
   invokeStructured,
   sanitizeJsonSchema,
   toBindableTools,
+  toProviderJsonSchema,
   toolParametersJsonSchema,
 } from "../src/index.js";
 import { createTestSession, workspaceType } from "./workspace.js";
 
-describe("toolParametersJsonSchema", () => {
+describe("toProviderJsonSchema", () => {
   it("converts a Zod object instead of passing its internals off as a schema", () => {
-    const schema = toolParametersJsonSchema(
+    const schema = toProviderJsonSchema(
       z.object({ title: z.string(), count: z.number().optional() }),
     );
 
     expect(schema.type).toBe("object");
     expect(Object.keys(schema.properties as object)).toEqual(["title", "count"]);
     expect(schema.required).toEqual(["title"]);
+    expect(schema.additionalProperties).toBe(false);
     // The regression this pins: a Zod v4 object has its own `type: "object"`.
     expect(schema).not.toHaveProperty("def");
     expect(schema).not.toHaveProperty("_zod");
   });
 
   it("passes JSON Schema through, stripping what the providers reject", () => {
-    const schema = toolParametersJsonSchema({
+    const schema = toProviderJsonSchema({
       $schema: "http://json-schema.org/draft-07/schema#",
       $id: "urn:x",
       type: "object",
@@ -42,9 +44,31 @@ describe("toolParametersJsonSchema", () => {
     ]);
   });
 
+  it("inlines $defs on a discriminated-union-shaped document instead of collapsing it", () => {
+    const schema = toProviderJsonSchema({
+      $defs: {
+        Epic: { type: "object", properties: { type: { const: "Epic" }, title: { type: "string" } } },
+        Feature: {
+          type: "object",
+          properties: { type: { const: "Feature" }, title: { type: "string" } },
+        },
+      },
+      oneOf: [{ $ref: "#/$defs/Epic" }, { $ref: "#/$defs/Feature" }],
+    });
+
+    expect(schema.$defs).toBeUndefined();
+    expect(JSON.stringify(schema)).not.toContain("$ref");
+    expect(schema.oneOf).toHaveLength(2);
+    expect(schema).not.toEqual({ type: "object", properties: {} });
+  });
+
   it("falls back to an empty object schema for something that is neither", () => {
-    expect(toolParametersJsonSchema("nonsense")).toEqual({ type: "object", properties: {} });
-    expect(toolParametersJsonSchema(undefined)).toEqual({ type: "object", properties: {} });
+    expect(toProviderJsonSchema("nonsense")).toEqual({ type: "object", properties: {} });
+    expect(toProviderJsonSchema(undefined)).toEqual({ type: "object", properties: {} });
+  });
+
+  it("is the same function as the toolParametersJsonSchema alias", () => {
+    expect(toolParametersJsonSchema).toBe(toProviderJsonSchema);
   });
 });
 
@@ -62,7 +86,6 @@ describe("sanitizeJsonSchema", () => {
     expect(clean.$defs).toBeUndefined();
     expect(clean.properties.origin.$ref).toBeUndefined();
     expect(clean.properties.origin.properties.x).toEqual({ type: "number" });
-    // The ref site's own keywords survive the inlining.
     expect(clean.properties.origin.description).toBe("Where it starts.");
     expect(clean.properties.path.items.properties.x).toEqual({ type: "number" });
   });
@@ -106,9 +129,12 @@ describe("toBindableTools", () => {
     expect(bound?.function.parameters).not.toHaveProperty("def");
   });
 
-  it("hands an unconvertible tool back untouched rather than sending garbage", () => {
+  it("sends an empty object schema rather than an unconvertible value", () => {
     const tool = { name: "odd", description: "", schema: 42 } as unknown as StructuredToolInterface;
-    expect(toBindableTools([tool])[0]).toBe(tool);
+    const [bound] = toBindableTools([tool]) as Array<{
+      function: { parameters: Record<string, unknown> };
+    }>;
+    expect(bound?.function.parameters).toEqual({ type: "object", properties: {} });
   });
 });
 
@@ -132,59 +158,68 @@ describe("bindAgentTools", () => {
     }
 
     const upsert = tools.find((t) => t.name === "upsert_node_Goal");
-    const properties = (upsert?.schema as unknown as { properties: Record<string, unknown> })
-      .properties;
-    expect(Object.keys(properties).length).toBeGreaterThan(0);
+    const schema = upsert?.schema as unknown as {
+      properties: Record<string, unknown>;
+      required?: string[];
+    };
+    expect(Object.keys(schema.properties).length).toBeGreaterThan(0);
+    // `toolJsonSchema` restores YAML `required: true` on upserts.
+    expect(schema.required).toContain("title");
   });
 });
 
 describe("invokeStructured", () => {
   const answer = z.object({ ok: z.boolean() });
-  const tool = { name: "graph_get", invoke: async () => "{}" } as unknown as StructuredToolInterface;
 
-  it("still answers when the tool loop fails mid-flight", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("is a single shot: no bindTools, sanitized JSON Schema, then parse", async () => {
+    let seen: { schema: unknown; config: unknown } | undefined;
     const model = {
-      bindTools: () => ({
-        invoke: async () => {
-          throw new Error("provider rejected the tool schema");
-        },
-      }),
-      withStructuredOutput: () => ({ invoke: async () => ({ ok: true }) }),
+      bindTools: () => {
+        throw new Error("structured output must not bind tools");
+      },
+      withStructuredOutput: (schema: unknown, config: unknown) => {
+        seen = { schema, config };
+        return { invoke: async () => ({ ok: true }) };
+      },
     } as unknown as BaseChatModel;
 
-    await expect(invokeStructured(model, answer, "plan it", "answer", { tools: [tool] })).resolves
-      .toEqual({ ok: true });
-    expect(warn).toHaveBeenCalled();
-    warn.mockRestore();
+    await expect(invokeStructured(model, answer, "plan it", "answer")).resolves.toEqual({
+      ok: true,
+    });
+    expect(seen?.config).toMatchObject({ name: "answer", strict: true });
+    const payload = seen?.schema as Record<string, unknown>;
+    expect(payload).not.toHaveProperty("_zod");
+    expect(payload).not.toHaveProperty("def");
+    expect(JSON.stringify(payload)).not.toContain("$ref");
+    expect(payload.type).toBe("object");
   });
 
-  it("carries what the tools returned into the structured call", async () => {
-    let body = "";
+  it("parses the provider payload through the Zod schema", async () => {
     const model = {
-      bindTools: () => ({
-        invoke: async () => ({
-          tool_calls: [{ name: "graph_get", args: {}, id: "c1" }],
-          content: "",
-        }),
-      }),
+      withStructuredOutput: () => ({ invoke: async () => ({ ok: "yes" }) }),
+    } as unknown as BaseChatModel;
+
+    await expect(invokeStructured(model, answer, "plan it", "answer")).rejects.toThrow();
+  });
+
+  it("forwards the system prompt as a SystemMessage", async () => {
+    let input: unknown;
+    const model = {
       withStructuredOutput: () => ({
-        invoke: async (messages: Array<{ content: string }>) => {
-          body = messages[messages.length - 1]!.content;
+        invoke: async (messages: unknown) => {
+          input = messages;
           return { ok: true };
         },
       }),
     } as unknown as BaseChatModel;
 
-    const events: string[] = [];
-    await invokeStructured(model, answer, "plan it", "answer", {
-      tools: [tool],
-      maxToolRounds: 1,
-      onToolEvent: (event) => events.push(event.name),
+    await invokeStructured(model, answer, "make epics", "manager_plan", {
+      system: "You are the manager.",
     });
 
-    expect(events).toEqual(["graph_get"]);
-    expect(body).toContain("## Tool findings");
-    expect(body).toContain("graph_get");
+    const messages = input as Array<{ constructor: { name: string }; content: string }>;
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.content).toBe("You are the manager.");
+    expect(messages[1]?.content).toBe("make epics");
   });
 });

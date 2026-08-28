@@ -1,6 +1,4 @@
 import { AzureChatOpenAI } from "@langchain/openai";
-import { AIMessage, HumanMessage, SystemMessage, ToolMessage } from "@langchain/core/messages";
-import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import {
   parseMcpSseOrJson,
@@ -9,7 +7,7 @@ import {
   unwrapJsonRpc,
 } from "./agent/mcp-http.ts";
 import { loadMicrosoftLearnTools, microsoftLearnMcpUrl } from "./agent/microsoft-learn.ts";
-import { invokeStructured, runToolCallingLoop, toBindableTools } from "@collabnode/deepagents";
+import { invokeStructured, toBindableTools } from "@collabnode/deepagents";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -212,132 +210,44 @@ async function testLearnToolWrapper() {
   console.log("✓ Learn MCP tools wrap");
 }
 
-async function testToolLoopBeforeStructuredOutput() {
-  console.log("▶ Architect invokeStructured runs tools before structured output");
-
-  const searchHits: string[] = [];
-  const search = tool(
-    async (input) => {
-      const query = String((input as { query?: unknown }).query ?? "");
-      searchHits.push(query);
-      return `Learn excerpt for ${query}`;
-    },
-    {
-      name: "microsoft_docs_search",
-      description: "Search Microsoft Learn",
-      schema: {
-        type: "object",
-        properties: { query: { type: "string" } },
-        required: ["query"],
-      },
-    },
-  );
-
-  const bound = toBindableTools([search]);
-  assert(
-    (bound[0] as { type?: string }).type === "function",
-    "JSON-schema MCP tools must bind as OpenAI functions, not Zod",
-  );
+async function testInvokeStructuredIsSingleShot() {
+  console.log("▶ invokeStructured is one shot — no bindTools");
 
   const planSchema = z.object({
     title: z.string(),
     grounded: z.boolean(),
   });
 
-  let boundInvokes = 0;
-  let structuredSawToolResult = false;
-  let structuredSawRawTranscript = false;
-  let boundToolName = "";
-
+  let bound = false;
+  let schemaSent: unknown;
   const model = {
-    bindTools(bindable: unknown[]) {
-      const first = bindable[0] as { name?: string; type?: string; function?: { name?: string } };
-      boundToolName = first?.name ?? first?.function?.name ?? "";
-      return {
-        invoke: async () => {
-          boundInvokes += 1;
-          if (boundInvokes === 1) {
-            return new AIMessage({
-              content: "",
-              tool_calls: [
-                {
-                  name: "microsoft_docs_search",
-                  args: { query: "Azure Container Apps auth" },
-                  id: "call-1",
-                  type: "tool_call",
-                },
-              ],
-            });
-          }
-          return new AIMessage({ content: "ready to submit the plan" });
-        },
-      };
+    bindTools() {
+      bound = true;
+      return { invoke: async () => ({}) };
     },
-    withStructuredOutput() {
+    withStructuredOutput(schema: unknown) {
+      schemaSent = schema;
       return {
-        invoke: async (input: unknown) => {
-          const messages = Array.isArray(input) ? input : [];
-          // The findings must arrive as prose. The structured model has no tools
-          // bound, so a replayed tool_call / ToolMessage pair would be rejected
-          // by Gemini and Azure alike.
-          structuredSawToolResult = messages.some((m) =>
-            String((m as { content?: unknown }).content).includes("Learn excerpt"),
-          );
-          structuredSawRawTranscript = messages.some(
-            (m) =>
-              ToolMessage.isInstance(m) ||
-              ((m as { tool_calls?: unknown[] }).tool_calls?.length ?? 0) > 0,
-          );
-          return { title: "C4 Container Diagram", grounded: true };
-        },
+        invoke: async () => ({ title: "C4 Container Diagram", grounded: true }),
       };
     },
   };
 
-  const events: string[] = [];
   const parsed = await invokeStructured(
     model as never,
     planSchema,
     "Design auth for a Container Apps API.",
     "architect_plan",
-    {
-      tools: [search],
-      system: "Use Microsoft Learn while you work.",
-      onToolEvent: (event) => events.push(event.name),
-    },
+    { system: "You are the architect." },
   );
 
-  assert(boundToolName === "microsoft_docs_search", `bindTools got ${boundToolName || "(none)"}`);
-  assert(searchHits.length === 1, "search tool was not invoked during the loop");
-  assert(searchHits[0] === "Azure Container Apps auth", "search query mismatch");
-  assert(events[0] === "microsoft_docs_search", "onToolEvent not fired");
-  assert(boundInvokes === 2, `expected two tool-loop model calls, got ${boundInvokes}`);
-  assert(structuredSawToolResult, "structured output did not see tool results — tools unused while answering");
+  assert(!bound, "invokeStructured must not bind tools");
   assert(
-    !structuredSawRawTranscript,
-    "structured output must not be handed tool_calls / ToolMessages: it has no tools bound",
+    schemaSent !== undefined && typeof schemaSent === "object" && !("_zod" in (schemaSent as object)),
+    "provider must receive JSON Schema, not Zod internals",
   );
   assert(parsed.title === "C4 Container Diagram" && parsed.grounded === true, "structured plan mismatch");
-  console.log("✓ Tool loop runs, then structured output sees tool results");
-}
-
-async function testToolLoopStopsWithoutCalls() {
-  console.log("▶ Tool loop exits when the model does not call tools");
-  const invokeCount = { n: 0 };
-  const messages = await runToolCallingLoop({
-    invoke: async (current) => {
-      invokeCount.n += 1;
-      assert(current[0] instanceof SystemMessage, "seed system message missing");
-      assert(current[1] instanceof HumanMessage, "seed human message missing");
-      return new AIMessage({ content: "no tools needed" });
-    },
-    tools: [],
-    messages: [new SystemMessage("sys"), new HumanMessage("hi")],
-    maxRounds: 4,
-  });
-  assert(invokeCount.n === 1, "loop should stop after a no-tool response");
-  assert(messages.length === 3, "expected seed + one AI message");
-  console.log("✓ Tool loop halt");
+  console.log("✓ Structured output is a single shot");
 }
 
 async function testLearnUrlBudget() {
@@ -350,14 +260,13 @@ async function testLearnUrlBudget() {
 }
 
 async function run() {
-  console.log("▶ Testing architect Microsoft Learn MCP + tool-calling workflow...");
+  console.log("▶ Testing Learn MCP wiring + single-shot structured output...");
   await testSseParser();
   await testMcpHttpClient();
   await testLearnToolWrapper();
-  await testToolLoopBeforeStructuredOutput();
-  await testToolLoopStopsWithoutCalls();
+  await testInvokeStructuredIsSingleShot();
   await testLearnUrlBudget();
-  console.log("🎉 Architect tool-calling tests passed");
+  console.log("🎉 Architect MCP + structured-output tests passed");
 }
 
 run().catch((err) => {

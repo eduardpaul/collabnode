@@ -1,35 +1,27 @@
 import type { BaseChatModel, BindToolsInput } from "@langchain/core/language_models/chat_models";
 import type { BaseMessage } from "@langchain/core/messages";
-import { HumanMessage, SystemMessage, ToolMessage } from "@langchain/core/messages";
+import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { StructuredToolInterface } from "@langchain/core/tools";
 import { z } from "zod";
 
 /**
- * Asking a model for a shape and letting it read the graph on the way there.
+ * Single-shot structured output, and the JSON Schema pipeline providers share.
  *
- * `withStructuredOutput` occupies the provider's function-calling channel, so a
- * single call cannot both run tools and return a schema-checked answer. The
- * split here — a tool loop first, then the structured call over what the tools
- * found — is the workaround, and it is the same one for every provider, so it
- * belongs beside the agent configuration rather than in each app.
+ * Deep Agents is the tool loop. This helper is the other call: given a role
+ * prompt and a Zod schema, ask once and parse. `withStructuredOutput` occupies
+ * the function-calling channel, so this path does not bind tools.
  *
- * Nothing here knows about a graph. `bindAgentTools` produces the tools this
- * consumes, and `runStructuredPlan` is the graph-shaped caller.
+ * Both this call and `bindAgentTools` send schemas through `toProviderJsonSchema`
+ * — Zod or JSON Schema in, the subset Gemini and Azure actually accept out.
  */
 
-/** One tool call and what it returned, for logging and progress reporting. */
-export interface ToolEvent {
-  name: string;
-  args: unknown;
-  result: string;
-}
-
 export interface StructuredInvokeOptions {
-  /** Tools the model may call while composing the answer. */
-  tools?: StructuredToolInterface[];
   system?: string;
-  maxToolRounds?: number;
-  onToolEvent?: (event: ToolEvent) => void;
+  /**
+   * OpenAI/Azure `json_schema` strict mode. Defaults to true: the schema was
+   * built for every key present (`planZod` `strict`, nullable for "no value").
+   */
+  strict?: boolean;
 }
 
 /**
@@ -67,14 +59,6 @@ function isZodSchema(schema: unknown): schema is z.ZodTypeAny {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
-function isJsonSchemaObject(schema: unknown): schema is Record<string, unknown> {
-  return (
-    isPlainObject(schema) &&
-    !isZodSchema(schema) &&
-    (schema as { type?: string }).type === "object"
-  );
 }
 
 /**
@@ -184,162 +168,67 @@ function sanitizeNode(
   delete obj.$defs;
   delete obj.definitions;
 
+  if (obj.type === "object" && obj.additionalProperties === undefined) {
+    obj.additionalProperties = false;
+  }
+
   sanitizeChildren(obj, defs, seen);
   return obj;
 }
 
+const emptyObjectSchema = (): Record<string, unknown> => ({ type: "object", properties: {} });
+
 /**
- * A tool's parameters as sanitized JSON Schema, whichever form it arrived in.
+ * Zod or JSON Schema → the subset of JSON Schema the providers accept.
  *
- * An MCP tool hands over JSON Schema already; a LangChain tool built here hands
- * over Zod. Falling back to an empty object schema keeps one unconvertible tool
- * from failing the whole bind.
+ * Used for tool parameters *and* structured-output schemas. A `planZod`
+ * discriminated union typically arrives with `$ref`/`$defs`; those have to be
+ * inlined before Gemini or Azure will take the call. Root `oneOf`/`anyOf` is
+ * kept — requiring `type: "object"` here used to collapse a plan schema to
+ * `{ type: "object", properties: {} }`.
  */
-export function toolParametersJsonSchema(schema: unknown): Record<string, unknown> {
-  const empty = (): Record<string, unknown> => ({ type: "object", properties: {} });
+export function toProviderJsonSchema(schema: unknown): Record<string, unknown> {
   let raw: unknown = schema;
-  if (!isJsonSchemaObject(raw)) {
-    if (!isZodSchema(raw)) return empty();
+  if (isZodSchema(raw)) {
     try {
-      raw = z.toJSONSchema(raw, { target: "draft-7", unrepresentable: "any" });
+      raw = z.toJSONSchema(raw, { target: "draft-7", io: "input", unrepresentable: "any" });
     } catch {
-      return empty();
+      return emptyObjectSchema();
     }
+  } else if (!isPlainObject(raw)) {
+    return emptyObjectSchema();
   }
   const clean = sanitizeJsonSchema(raw);
-  return isJsonSchemaObject(clean) ? clean : empty();
+  return isPlainObject(clean) && !isZodSchema(clean) ? clean : emptyObjectSchema();
 }
+
+/** @deprecated Use `toProviderJsonSchema`. Same pipeline; kept for existing imports. */
+export const toolParametersJsonSchema = toProviderJsonSchema;
 
 /**
- * Prefer native LangChain tools (LangChain 1.x `bindTools` accepts JSON Schema).
- * Fall back to OpenAI / Gemini function defs with sanitized JSON schemas.
+ * OpenAI / Gemini function defs with sanitized JSON schemas.
+ *
+ * Deep Agents / `bindTools` can take native LangChain tools; this is the
+ * fallback when a provider rejects Zod internals or `$ref`s.
  */
 export function toBindableTools(tools: StructuredToolInterface[]): BindToolsInput[] {
-  return tools.map((t) => {
-    let raw: unknown = t.schema;
-    if (!isJsonSchemaObject(raw)) {
-      if (!isZodSchema(raw)) return t;
-      try {
-        raw = z.toJSONSchema(raw, { target: "draft-7", unrepresentable: "any" });
-      } catch {
-        // Hand the tool back untouched so LangChain can try its own conversion
-        // rather than sending an unconverted schema as `parameters`.
-        return t;
-      }
-    }
-    const clean = sanitizeJsonSchema(raw);
-    if (!isJsonSchemaObject(clean)) {
-      return t;
-    }
-    return {
-      type: "function",
-      function: {
-        name: t.name,
-        description: t.description || t.name,
-        parameters: clean,
-      },
-    };
-  });
-}
-
-function toolCallsOf(message: BaseMessage): Array<{
-  name: string;
-  args: Record<string, unknown>;
-  id?: string;
-}> {
-  const raw = (message as { tool_calls?: Array<{ name: string; args?: unknown; id?: string }> })
-    .tool_calls;
-  if (!Array.isArray(raw) || raw.length === 0) {
-    return [];
-  }
-  return raw.map((call) => ({
-    name: call.name,
-    args: (call.args && typeof call.args === "object" ? call.args : {}) as Record<string, unknown>,
-    id: call.id,
+  return tools.map((t) => ({
+    type: "function",
+    function: {
+      name: t.name,
+      description: t.description || t.name,
+      parameters: toProviderJsonSchema(t.schema),
+    },
   }));
 }
 
 /**
- * Run model ↔ tool rounds. `withStructuredOutput` occupies the function-calling
- * channel, so tools must run in a prior loop; the conversation (including tool
- * results) is what the structured-output call then sees.
- */
-export async function runToolCallingLoop(options: {
-  invoke: (messages: BaseMessage[]) => Promise<BaseMessage>;
-  tools: StructuredToolInterface[];
-  messages: BaseMessage[];
-  maxRounds?: number;
-  onToolEvent?: (event: ToolEvent) => void;
-}): Promise<BaseMessage[]> {
-  const { invoke, tools, onToolEvent } = options;
-  const messages = [...options.messages];
-  const maxRounds = options.maxRounds ?? 6;
-  const toolsByName = new Map(tools.map((t) => [t.name, t]));
-
-  for (let round = 0; round < maxRounds; round++) {
-    const response = await invoke(messages);
-    messages.push(response);
-    const calls = toolCallsOf(response);
-    if (calls.length === 0) {
-      break;
-    }
-
-    for (const [index, call] of calls.entries()) {
-      const impl = toolsByName.get(call.name);
-      let result: string;
-      try {
-        if (!impl) {
-          result = `Unknown tool: ${call.name}`;
-        } else {
-          const raw = await impl.invoke(call.args);
-          result = typeof raw === "string" ? raw : JSON.stringify(raw);
-        }
-      } catch (err) {
-        result = `Tool error: ${err instanceof Error ? err.message : String(err)}`;
-      }
-      onToolEvent?.({ name: call.name, args: call.args, result });
-      messages.push(
-        new ToolMessage({
-          content: result,
-          tool_call_id: call.id ?? `${call.name}-${round}-${index}`,
-          name: call.name,
-        }),
-      );
-    }
-  }
-
-  return messages;
-}
-
-/**
- * Flatten a finished tool transcript into plain text.
+ * Ask once for a shape. No tools, no Deep Agents loop.
  *
- * The structured-output model has no tools bound to it, so replaying the raw
- * transcript would hand it `tool_calls` and `ToolMessage`s that reference tools
- * it does not know — Gemini and Azure both reject that. The findings therefore
- * travel as ordinary prose appended to the prompt.
- */
-export function summarizeToolTranscript(messages: BaseMessage[]): string {
-  const findings: string[] = [];
-  for (const message of messages) {
-    if (!ToolMessage.isInstance(message)) continue;
-    const text =
-      typeof message.content === "string" ? message.content : JSON.stringify(message.content);
-    if (!text.trim()) continue;
-    findings.push(`### ${message.name ?? "tool"}\n${text.trim()}`);
-  }
-  return findings.join("\n\n");
-}
-
-/**
- * Bind a Zod schema onto the chat model so the provider enforces the shape
- * (OpenAI/Azure json_schema, Gemini function-calling) instead of scraping JSON
- * out of free-form text.
- *
- * When `tools` are passed, the model may call them in a loop *before* the
- * structured-output call. A single `withStructuredOutput().invoke(prompt)`
- * cannot mix tools: the output schema takes the tool channel. What the tools
- * returned is carried across as text, not as a replayed transcript.
+ * The schema is converted and sanitized *before* `withStructuredOutput`, so the
+ * provider sees JSON Schema it can enforce (OpenAI/Azure `json_schema` +
+ * `strict`, Gemini function-calling) rather than Zod internals or `$ref`s.
+ * `schema.parse` is the local check after the provider answers.
  */
 export async function invokeStructured<T extends z.ZodTypeAny>(
   model: BaseChatModel,
@@ -348,51 +237,13 @@ export async function invokeStructured<T extends z.ZodTypeAny>(
   name: string,
   options?: StructuredInvokeOptions,
 ): Promise<z.infer<T>> {
-  const tools = options?.tools ?? [];
-  const canBind = tools.length > 0 && typeof model.bindTools === "function";
-  const structured = () => model.withStructuredOutput(schema, { name });
-  const structuredInput = (body: string): BaseMessage[] => {
-    const messages: BaseMessage[] = [];
-    if (options?.system) messages.push(new SystemMessage(options.system));
-    messages.push(new HumanMessage(body));
-    return messages;
-  };
-
-  if (!canBind) {
-    return schema.parse(await structured().invoke(structuredInput(prompt))) as z.infer<T>;
-  }
-
-  let bound: ReturnType<NonNullable<BaseChatModel["bindTools"]>>;
-  try {
-    try {
-      bound = model.bindTools!(tools);
-    } catch {
-      bound = model.bindTools!(toBindableTools(tools));
-    }
-  } catch (err) {
-    console.warn("bindTools failed, continuing without tool loop:", err);
-    return schema.parse(await structured().invoke(structuredInput(prompt))) as z.infer<T>;
-  }
-
-  // The loop reaches the provider, so most of its failure modes are async: a
-  // rejected bind, a model that will not emit tool calls, a transport error.
-  // None of those are worth losing the answer over — the structured call still
-  // stands on its own, just without the findings.
-  let messages: BaseMessage[];
-  try {
-    messages = await runToolCallingLoop({
-      invoke: (current) => bound.invoke(current) as Promise<BaseMessage>,
-      tools,
-      messages: structuredInput(prompt),
-      maxRounds: options?.maxToolRounds,
-      onToolEvent: options?.onToolEvent,
-    });
-  } catch (err) {
-    console.warn("tool loop failed, continuing without tool findings:", err);
-    return schema.parse(await structured().invoke(structuredInput(prompt))) as z.infer<T>;
-  }
-
-  const findings = summarizeToolTranscript(messages);
-  const body = findings ? `${prompt}\n\n## Tool findings\n${findings}` : prompt;
-  return schema.parse(await structured().invoke(structuredInput(body))) as z.infer<T>;
+  const jsonSchema = toProviderJsonSchema(schema);
+  const structured = model.withStructuredOutput(jsonSchema, {
+    name,
+    strict: options?.strict ?? true,
+  });
+  const messages: BaseMessage[] = [];
+  if (options?.system) messages.push(new SystemMessage(options.system));
+  messages.push(new HumanMessage(prompt));
+  return schema.parse(await structured.invoke(messages));
 }

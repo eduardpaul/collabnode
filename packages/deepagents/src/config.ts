@@ -6,6 +6,7 @@ import type {
   CollabDeepAgentConfig,
   CollabSubAgentConfig,
   DeepAgentConfigOptions,
+  DeepAgentMiddleware,
   SubAgentConfigOptions,
 } from "./types.js";
 import { resolveI18nString, type AgentDef } from "@collabnode/schema";
@@ -26,10 +27,32 @@ export function findAgentDef(
 }
 
 /**
+ * The subset of `CollabDeepAgentConfig` that `createDeepAgent` actually takes.
+ *
+ * Actor / role / language / agentDef stay on the Collab config for inspection;
+ * passing them through would be ignored at best and a type error at worst.
+ */
+type CreateDeepAgentInput = NonNullable<Parameters<typeof createDeepAgent>[0]>;
+
+export function toCreateDeepAgentParams(config: CollabDeepAgentConfig): CreateDeepAgentInput {
+  return {
+    model: config.model,
+    systemPrompt: config.systemPrompt,
+    tools: config.tools,
+    middleware: config.middleware,
+    interruptOn: config.interruptOn,
+    subagents: config.subagents,
+    backend: config.backend,
+    checkpointer: config.checkpointer,
+    store: config.store,
+  };
+}
+
+/**
  * Generates a complete, ready-to-use DeepAgent configuration object from Collabnode schema and session.
- * 
+ *
  * Library consumers can inspect, tweak, or extend this configuration before creating the agent,
- * or pass it directly to `createDeepAgent(config)`.
+ * or pass `toCreateDeepAgentParams(config)` to `createDeepAgent`.
  */
 export function getDeepAgentConfig(options: DeepAgentConfigOptions): CollabDeepAgentConfig {
   const {
@@ -54,7 +77,6 @@ export function getDeepAgentConfig(options: DeepAgentConfigOptions): CollabDeepA
   const agentDef = findAgentDef(options);
   const actorId = options.actorId ?? agentDef?.actorId ?? session.actorId ?? "agent";
 
-  // 1. Bind schema tools to the live CollabSession, stamped with actorId and respecting access policies
   const tools = bindAgentTools({
     session,
     schema,
@@ -68,7 +90,6 @@ export function getDeepAgentConfig(options: DeepAgentConfigOptions): CollabDeepA
     onToolCall,
   });
 
-  // 2. Assemble context-engineered system prompt
   const systemPrompt = buildAgentSystemPrompt({
     schema,
     workspaceType,
@@ -79,24 +100,18 @@ export function getDeepAgentConfig(options: DeepAgentConfigOptions): CollabDeepA
     systemPromptOverride,
   });
 
-  // 3. Assemble middleware
-  const middleware: any[] = [...extraMiddleware];
-
-  // Enable task planning (write_todos / TodoListMiddleware) if requested or declared in schema
+  const middleware: DeepAgentMiddleware[] = [...extraMiddleware];
   const internalPlanning = options.internalPlanning ?? agentDef?.internalPlanning ?? false;
   if (internalPlanning) {
     middleware.push(todoListMiddleware());
   }
-
-  // 4. Resolve Human-in-the-Loop interrupt configuration
-  const interruptOn = options.interruptOn ?? undefined;
 
   return {
     model,
     systemPrompt,
     tools,
     middleware: middleware.length > 0 ? middleware : undefined,
-    interruptOn,
+    interruptOn: options.interruptOn,
     subagents,
     backend,
     checkpointer,
@@ -134,6 +149,7 @@ export function createSubAgentConfig(options: SubAgentConfigOptions): CollabSubA
     // Without the workspace policy a subagent bypasses `tools.expose` and the
     // per-role `nodes.readOnly` list that the parent agent is held to.
     toolsPolicy: workspaceType?.tools,
+    views: workspaceType?.views,
     agentDef,
     actorId,
     language,
@@ -164,9 +180,10 @@ export function createSubAgentConfig(options: SubAgentConfigOptions): CollabSubA
 }
 
 /**
- * Convenience helper to instantiate a compiled DeepAgent directly from Collabnode configuration.
+ * Instantiates a compiled DeepAgent from Collabnode configuration.
+ *
+ * Only the keys `createDeepAgent` documents are forwarded.
  */
 export function createWorkspaceDeepAgent(options: DeepAgentConfigOptions) {
-  const config = getDeepAgentConfig(options);
-  return createDeepAgent(config as any);
+  return createDeepAgent(toCreateDeepAgentParams(getDeepAgentConfig(options)));
 }
