@@ -23,6 +23,7 @@ export class HocuspocusCollabBackend implements CollabBackend {
     namedDocuments: true,
     deletion: true,
     presence: true,
+    versioning: false,
   };
   private readonly url: string;
 

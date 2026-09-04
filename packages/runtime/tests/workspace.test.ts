@@ -251,6 +251,7 @@ describe("presence", () => {
       namedDocuments: true,
       deletion: true,
       presence: true,
+      versioning: false,
     });
     await session.close();
   });

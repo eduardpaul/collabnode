@@ -186,7 +186,7 @@ Hocuspocus uses the same join payload with `collab.kind: "hocuspocus"` and a Web
 
 ## Collab backends
 
-`CollabBackend` is the seam. Fluid and Hocuspocus (Yjs) both implement it; Loro can later. The web package uses that seam so UI code does not change with the CRDT vendor.
+`CollabBackend` is the seam. Fluid, Hocuspocus (Yjs), and Loro all implement it. The web package uses that seam so UI code does not change with the CRDT vendor.
 
 ```ts
 const node = await init({
@@ -194,6 +194,25 @@ const node = await init({
   collab: { kind: "hocuspocus" }, // local ws://127.0.0.1:1234
 });
 // or { kind: "hocuspocus", url: "wss://collab.example.com" }
+// or { kind: "loro", dir: "data/docs" }
+```
+
+| | `memory` | `hocuspocus` | `fluid` | `loro` |
+| --- | --- | --- | --- | --- |
+| Peers across processes | no | yes | yes | **no** |
+| Browser peers | no | yes | yes | **no** |
+| Names its own document ids | yes | yes | no | yes |
+| Durable without a server | no | no | no | **yes** (`dir`) |
+| Versions: `version()` / `diffSince()` / `checkout()` | no | no | no | **yes** |
+
+Loro keeps a DAG of the edits behind the document, so `session.version()` names a
+version, `session.exportDoc()` serializes the whole thing, and
+`session.checkout(v)` reads it as it was. It ships no transport, which is why it
+is in-process: browser peers still need Hocuspocus or Fluid. What it buys and
+what it costs is in `@collabnode/loro`.
+
+```ts
+session.capabilities; // { namedDocuments, deletion, presence, versioning }
 ```
 
 ## Live property types (`text` / `map` / `array`)

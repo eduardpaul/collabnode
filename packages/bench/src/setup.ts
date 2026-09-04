@@ -141,6 +141,12 @@ function collabKind(
   if (backend === "hocuspocus") {
     return { kind: "hocuspocus", port: port === 7070 ? 1234 : port };
   }
+  if (backend === "loro") {
+    // No `dir`: the ladders measure the CRDT and the projection, and a disk
+    // write per commit would be measuring the filesystem instead. Persistence
+    // is a separate question from the ones these scenarios ask.
+    return { kind: "loro" };
+  }
   return { kind: "fluid", port };
 }
 

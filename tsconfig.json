@@ -26,6 +26,9 @@
       "path": "packages/hocuspocus"
     },
     {
+      "path": "packages/loro"
+    },
+    {
       "path": "packages/azure"
     },
     {

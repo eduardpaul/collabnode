@@ -162,6 +162,7 @@ export class FluidCollabBackend implements CollabBackend {
     namedDocuments: false,
     deletion: false,
     presence: false,
+    versioning: false,
   };
   private readonly container: NonNullable<FluidCollabBackendOptions["open"]>;
 

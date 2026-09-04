@@ -28,16 +28,17 @@
     "README.md"
   ],
   "keywords": [
-    "crdt",
     "collaboration",
-    "graph",
-    "mcp",
-    "yjs",
+    "crdt",
     "fluid",
+    "graph",
+    "hocuspocus",
+    "loro",
+    "mcp",
+    "model-context-protocol",
     "realtime",
     "sharedtree",
-    "hocuspocus",
-    "model-context-protocol"
+    "yjs"
   ],
   "scripts": {
     "build": "tsc -b",
@@ -50,10 +51,11 @@
     "@collabnode/collab": "workspace:*",
     "@collabnode/embeddings": "workspace:*",
     "@collabnode/fluid": "workspace:*",
+    "@collabnode/graph": "workspace:*",
     "@collabnode/hocuspocus": "workspace:*",
     "@collabnode/hub": "workspace:*",
-    "@collabnode/graph": "workspace:*",
     "@collabnode/ladybug": "workspace:*",
+    "@collabnode/loro": "workspace:*",
     "@collabnode/mcp": "workspace:*",
     "@collabnode/runtime": "workspace:*",
     "@collabnode/schema": "workspace:*"

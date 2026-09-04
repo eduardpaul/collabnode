@@ -443,6 +443,7 @@ export class InMemoryCollabBackend implements CollabBackend {
     namedDocuments: true,
     deletion: true,
     presence: true,
+    versioning: false,
   };
   private readonly docs = new Map<string, MemoryState>();
 

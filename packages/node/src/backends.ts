@@ -12,6 +12,8 @@ import {
   hocuspocusUrl,
 } from "@collabnode/hocuspocus";
 import { ensureHocuspocus, stopHocuspocus } from "@collabnode/hocuspocus/node";
+import { LoroCollabBackend } from "@collabnode/loro";
+import { fileDocStore } from "@collabnode/loro/node";
 import { LadybugGraphStore } from "@collabnode/ladybug";
 import type { CollabKind, EmbeddingsKind, GraphKind } from "./options.js";
 
@@ -20,7 +22,8 @@ export type CollabJoin =
   | { kind: "custom" }
   | { kind: "fluid"; relay: "tinylicious"; domain: string; port: number }
   | { kind: "fluid"; relay: "azure"; tenantId: string; endpoint: string; tokenEndpoint?: string }
-  | { kind: "hocuspocus"; url: string };
+  | { kind: "hocuspocus"; url: string }
+  | { kind: "loro" };
 
 export interface OpenedCollab {
   backend: CollabBackend;
@@ -57,6 +60,9 @@ export async function openCollab(
         await stopHocuspocus(owned);
       },
     };
+  }
+  if (collab.kind === "loro") {
+    return openLoro(collab);
   }
   if (collab.kind === "fluid") {
     const relay = collab.relay ?? "tinylicious";
@@ -104,6 +110,25 @@ export async function openCollab(
   }
   const _never: never = collab;
   throw new Error(`unknown collab kind ${JSON.stringify(_never)}`);
+}
+
+function openLoro(collab: Extract<CollabKind, { kind: "loro" }>): OpenedCollab {
+  const backend = new LoroCollabBackend({
+    ...(collab.dir ? { store: fileDocStore(collab.dir) } : {}),
+    ...(collab.persistAs ? { persistAs: collab.persistAs } : {}),
+  });
+  return {
+    backend,
+    // Not a join descriptor a browser can use: Loro has no relay to point at.
+    // `webJoinInfo` refuses this kind for that reason.
+    join: { kind: "loro" },
+    // Documents are written back as their last handle closes, but a process
+    // that exits while a workspace is still open would lose the debounced tail;
+    // flushing here is what makes `close()` mean "it is on disk".
+    close: async () => {
+      await backend.flush();
+    },
+  };
 }
 
 /**

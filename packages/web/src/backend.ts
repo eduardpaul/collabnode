@@ -25,6 +25,11 @@ export async function openWebCollab(
           'collab.kind "memory" is in-process and cannot join from a browser. Use Fluid or Hocuspocus, or pass { kind: "custom", backend }. @collabnode/web will not fall through to Tinylicious.',
         );
       }
+      if (label === "loro") {
+        throw new Error(
+          'collab.kind "loro" is in-process and cannot join from a browser: Loro ships no transport, so there is no relay for a tab to connect to. Run the workspace on Fluid or Hocuspocus for browser peers, or pass { kind: "custom", backend } with a Loro backend of your own that syncs over your transport.',
+        );
+      }
       throw new Error(
         `Unsupported collab.kind "${label}" for @collabnode/web. Expected "fluid", "hocuspocus", or "custom".`,
       );

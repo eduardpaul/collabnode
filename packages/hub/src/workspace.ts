@@ -324,6 +324,14 @@ export class Workspace {
       // Step 3: Capture history
       const history = this.session.history();
 
+      // Step 3b: Capture the document itself, on a backend that has versions.
+      //
+      // This has to happen here, between draining and retention: `delete`
+      // retention destroys the document a few lines below, and a snapshot alone
+      // cannot be reopened at a version it used to hold.
+      const documentVersion = this.session.version();
+      const bytes = this.session.exportDoc(this.hub.options.artifactExport ?? "snapshot");
+
       // Step 4: Build artifact
       const artifact: WorkspaceArtifact = {
         id: this.id,
@@ -336,6 +344,8 @@ export class Workspace {
         participants: this.getParticipants(),
         snapshot,
         history: history.length > 0 ? history : undefined,
+        ...(documentVersion ? { documentVersion } : {}),
+        ...(bytes ? { bytes } : {}),
       };
 
       // Step 5: Await consumer onEnd hooks

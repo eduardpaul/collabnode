@@ -1,4 +1,4 @@
-import type { CollabBackend } from "@collabnode/collab";
+import type { CollabBackend, DocExportMode } from "@collabnode/collab";
 import type { EmbeddingProvider, GraphStore } from "@collabnode/graph";
 import type { GraphSchema } from "@collabnode/schema";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,26 @@ export type CollabKind =
       tokenEndpoint?: string;
     }
   | { kind: "hocuspocus"; port?: number; url?: string }
+  | {
+      /**
+       * Loro: the backend that can name, diff, and check out versions.
+       *
+       * In-process — Loro ships no transport, and none is invented here — so
+       * this is for a single host, not for browser peers. What it buys over
+       * `memory` is that documents survive the process and carry their own
+       * history: `session.version()`, `session.exportDoc()`, artifacts that
+       * reopen as a checkout, and projections updated by diff rather than by
+       * comparing whole snapshots.
+       */
+      kind: "loro";
+      /**
+       * Directory documents are stored in, one file per document. Omit for a
+       * process-local document that disappears with the process.
+       */
+      dir?: string;
+      /** How much history to persist. Default `"snapshot"`; see `DocExportMode`. */
+      persistAs?: DocExportMode;
+    }
   | { kind: "custom"; backend: CollabBackend };
 
 export type GraphKind =

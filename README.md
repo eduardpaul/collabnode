@@ -140,6 +140,7 @@ Host apps should depend on **`collabnode`**. Scoped packages are for advanced wi
 | `@collabnode/collab` | `CollabBackend` interface |
 | `@collabnode/fluid` | Fluid SharedTree + Tinylicious client (process spawn is `@collabnode/fluid/node`) |
 | `@collabnode/hocuspocus` | Yjs graph + Hocuspocus provider (in-process server is `@collabnode/hocuspocus/node`) |
+| `@collabnode/loro` | Loro graph: DAG history, version tokens, checkout, shallow-snapshot artifacts (file store is `@collabnode/loro/node`) |
 | `@collabnode/azure` | Azure Fluid Relay transport (Node) |
 | `@collabnode/ladybug` | Ladybug `GraphStore` (`@ladybugdb/core` optional peer) |
 | `@collabnode/age` | Apache AGE `GraphStore` (`pg` + Postgres AGE extension) |
@@ -399,7 +400,7 @@ app can import it instead of parsing YAML. Consumers that only want types should
 
 ## Collab backends
 
-`CollabBackend` is the seam. Fluid and Hocuspocus (Yjs) both implement it; Loro can later. The web package uses that seam so UI code does not change with the CRDT vendor.
+`CollabBackend` is the seam. Fluid, Hocuspocus (Yjs), and Loro all implement it. The web package uses that seam so UI code does not change with the CRDT vendor.
 
 ```ts
 const node = await init({
@@ -407,7 +408,54 @@ const node = await init({
   collab: { kind: "hocuspocus" }, // local ws://127.0.0.1:1234
 });
 // or { kind: "hocuspocus", url: "wss://collab.example.com" }
+// or { kind: "loro", dir: "data/docs" }
 ```
+
+| | `memory` | `hocuspocus` | `fluid` | `loro` |
+| --- | --- | --- | --- | --- |
+| Peers across processes | no | yes | yes | **no** |
+| Browser peers | no | yes | yes | **no** |
+| Names its own document ids | yes | yes | no | yes |
+| Durable without a server | no | no | no | **yes** (`dir`) |
+| Versions: `version()` / `diffSince()` / `checkout()` | no | no | no | **yes** |
+
+Backends declare what they can do rather than being probed for it, so a caller
+picks correctly instead of finding out at termination time:
+
+```ts
+session.capabilities; // { namedDocuments, deletion, presence, versioning }
+```
+
+### Versioning (`capabilities.versioning`)
+
+Loro is the backend that keeps a DAG of the edits behind the document, so it can
+name a version, say what changed since one, and show the document as it was. The
+rest of collabnode uses that where it helps and works without it where it is
+missing:
+
+```ts
+const at = session.version();              // undefined on Yjs / Fluid
+// ... work happens ...
+session.exportDoc();                       // the whole document, history included
+session.checkout(at);                      // read it as it was; throws where unsupported
+```
+
+Three things change on a versioned backend, and nothing changes on the others:
+
+- **`history()` is unbounded.** Yjs and Fluid keep a `HistoryEntry` array inside
+  the replicated document, re-decode all of it on every write, and cap it at
+  `changeTracking.historyLimit`. Loro attaches entries to the commit that made
+  them, so nothing is stored twice and nothing is trimmed by a constant.
+- **Projections update by diff.** `Projector` asks `diffSince` when the backend
+  has it, instead of walking two full snapshots per change.
+- **Artifacts reopen as a checkout.** See below.
+
+Everything above degrades honestly: `version()` returns `undefined`,
+`checkout()` throws with the reason, and the projector falls back to comparing
+snapshots. Nothing silently pretends.
+
+See `@collabnode/loro` for what it costs — chiefly that Loro ships no transport,
+so that backend is in-process and browser peers still need Hocuspocus or Fluid.
 
 ## Live property types (`text` / `map` / `array`)
 
@@ -519,6 +567,11 @@ config:
 ```
 
 Requires `actorId` on `init()`. Stamps `meta.createdBy/At` and `meta.updatedBy/At`.
+
+`mode: history` also records a per-op entry readable through `session.history()`.
+On Yjs and Fluid those entries live in the document and `historyLimit` evicts the
+oldest; on Loro they ride the edit DAG, are not stored in the document, and are
+not capped — see [Versioning](#versioning-capabilitiesversioning).
 
 ## Workspace types and the Hub
 
@@ -644,10 +697,23 @@ const artifact = await ws.end("explicit");
 artifact.snapshot;       // nodes + edges as they finished
 artifact.history;        // only when changeTracking is on
 artifact.participants;   // who was in it, human or agent, joined and left
+artifact.bytes;          // the document itself, on a backend with versioning
+artifact.documentVersion; // the CRDT version it ended at
 
-const review = await hub.reopen(artifact);                 // read-only remount, in memory
+const review = await hub.reopen(artifact);                 // read-only remount
 const next = await hub.open("retro", { from: artifact });  // seed the next one from it
 ```
+
+`artifact.snapshot` is the portable record and every consumer can read it. On a
+backend with `capabilities.versioning`, `bytes` is the document as well, and that
+is what turns `reopen` from a re-seed into a **checkout**: the review mount is the
+workspace's own document, so `session.history()` returns what actually happened
+and `session.checkout(v)` — or `hub.reopen(artifact, { at: v })` — shows how it
+looked at any point it passed through. Without bytes the snapshot is replayed
+into a throwaway in-memory document, which shows the same graph but has no past;
+asking for `at` there is refused rather than quietly showing the final state.
+`createHub({ artifactExport: "shallow" })` trades rewinding for much smaller
+artifacts.
 
 A review is genuinely read-only and detached: it reports the artifact's id so a
 UI can say what it is showing, but writes are refused rather than dropped into a

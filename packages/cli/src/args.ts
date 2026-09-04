@@ -24,6 +24,8 @@ export interface CliArgs {
   watch?: boolean;
   /** `types`: module specifier the generated file imports library types from. */
   importFrom?: string;
+  /** `--backend loro`: directory documents are stored in. Omit to keep them in memory. */
+  docs?: string;
 }
 
 const COMMANDS: CliArgs["command"][] = ["validate", "ddl", "types", "serve", "mcp", "help"];
@@ -38,6 +40,9 @@ const VALUE_FLAGS: Record<string, (out: CliArgs, value: string | undefined) => v
   },
   "--graph-name": (out, v) => {
     out.graphName = v;
+  },
+  "--docs": (out, v) => {
+    out.docs = v;
   },
   "--backend": (out, v) => {
     out.backend = v as CliArgs["backend"];
@@ -159,14 +164,16 @@ Commands:
   mcp <schema.yaml>        Start a schema-driven MCP server (agent peer)
 
 Flags:
-  --backend memory|fluid|hocuspocus
-                           Collab CRDT backend (default fluid). loro is reserved.
+  --backend memory|fluid|hocuspocus|loro
+                           Collab CRDT backend (default fluid). loro is in-process
+                           and versioned: history, diffs, and checkout.
   --relay tinylicious|azure
                            Fluid transport (default tinylicious). Azure is hosted;
                            this CLI never starts Fluid Relay.
   --graph memory|ladybug|age
                            Query projection (default memory)
   --data <path|url>        Ladybug database path, or AGE postgres URL
+  --docs <dir>             --backend loro: where documents are stored
   --graph-name <name>      Apache AGE graph name
   --join <id>              Join an existing collab document
   --actor <id>             Actor id for opt-in change tracking

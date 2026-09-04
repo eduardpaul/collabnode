@@ -194,6 +194,13 @@ export class Hub {
    * are refused rather than dropped into a copy nobody will read, and `close()`
    * touches neither the registry nor the live map. To carry an artifact
    * forward, open a new workspace with `from: artifact`.
+   *
+   * When the artifact carries `bytes` — a backend with `capabilities.versioning`
+   * put them there — the mount is a **checkout** rather than a re-seed: it is
+   * the workspace's own document, history included, so `session.checkout(v)`
+   * can rewind it and `session.history()` returns what actually happened rather
+   * than nothing. Pass `at` to open it already rewound. Without bytes the
+   * snapshot is replayed into a throwaway in-memory document, exactly as before.
    */
   async reopen(
     artifact: WorkspaceArtifact,
@@ -219,15 +226,7 @@ export class Hub {
 
 
     const reviewId = `review-${artifact.id}-${generateId("uuid")}`;
-    const collab = new InMemoryCollabBackend();
-    const session = await CollabSession.open(reviewId, {
-      schema: resolvedType.schema,
-      collab,
-      actorId: options.actorId ?? "reviewer",
-    });
-
-    const ops = snapshotToGraphOpInputs(artifact.snapshot);
-    await session.applyOps(ops);
+    const session = await this.openReviewSession(artifact, resolvedType, reviewId, options);
 
     const ws = new Workspace({
       id: artifact.id,
@@ -242,6 +241,50 @@ export class Hub {
     });
     ws.markActive();
     return ws;
+  }
+
+  /**
+   * The document a review mount reads from.
+   *
+   * Restoring the artifact's own bytes is preferred wherever it is possible,
+   * and the fallback is not merely a slower path to the same place: a re-seeded
+   * document shows the right graph but has no history, so `history()` is empty
+   * and there is no earlier version to check out. Which one a caller got is
+   * visible from `session.version()`.
+   */
+  private async openReviewSession(
+    artifact: WorkspaceArtifact,
+    type: WorkspaceType,
+    reviewId: string,
+    options: ReopenOptions,
+  ): Promise<CollabSession> {
+    const actorId = options.actorId ?? "reviewer";
+    if (artifact.bytes && this.collab.restore) {
+      const handle = await this.collab.restore(artifact.bytes, type.schema, { actorId });
+      const session = await CollabSession.adopt(handle, {
+        schema: type.schema,
+        collab: this.collab,
+        actorId,
+      });
+      if (options.at) {
+        session.checkout(options.at);
+      }
+      return session;
+    }
+    if (options.at) {
+      throw new Error(
+        `Cannot reopen workspace ${artifact.id} at a past version: the artifact carries no document bytes, ` +
+          "which means it was produced by a backend without versioning. Reopen without `at`, or run the " +
+          "workspace on a versioned backend such as @collabnode/loro.",
+      );
+    }
+    const session = await CollabSession.open(reviewId, {
+      schema: type.schema,
+      collab: new InMemoryCollabBackend(),
+      actorId,
+    });
+    await session.applyOps(snapshotToGraphOpInputs(artifact.snapshot));
+    return session;
   }
 
   async get(id: string): Promise<WorkspaceRecord | undefined> {

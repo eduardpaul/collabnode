@@ -1,4 +1,4 @@
-import type { CollaborativeGraph } from "@collabnode/collab";
+import { isVersioned, type CollaborativeGraph, type VersionToken } from "@collabnode/collab";
 import {
   diffSnapshots,
   snapshotToOps,
@@ -19,12 +19,35 @@ export type ProjectorListener<S extends GraphTypeMap = AnyGraph> = (
   snapshot: GraphSnapshot<S>,
 ) => void;
 
+/**
+ * A snapshot together with the version it was read at.
+ *
+ * The two travel as a pair on purpose. The version is captured in the same
+ * synchronous turn as the snapshot, so a diff computed against it describes
+ * exactly the state the snapshot shows — not whatever has landed by the time
+ * the debounced projection actually runs.
+ */
+interface PendingSnapshot {
+  snapshot: GraphSnapshot;
+  version: VersionToken | undefined;
+}
+
 /** Debounce CRDT-only sink writes so the graph store is not updated per keystroke. */
 export const CRDT_PROJECT_DEBOUNCE_MS = 250;
 
 export class Projector {
   private previous: GraphSnapshot | undefined;
-  private pending: GraphSnapshot | undefined;
+  /**
+   * The version `previous` was read at, on a backend that can name one.
+   *
+   * Holding it is what lets the diff be asked of the CRDT instead of computed
+   * by walking two snapshots: `diffSnapshots` is linear in the size of the
+   * graph and stringifies every property of every node on every change, while
+   * `diffSince` is linear in what actually changed. On a backend without
+   * versions this stays undefined and nothing below it changes.
+   */
+  private previousVersion: VersionToken | undefined;
+  private pending: PendingSnapshot | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private unsubscribe: (() => void) | undefined;
   private readonly listeners = new Set<ProjectorListener>();
@@ -63,22 +86,25 @@ export class Projector {
       await this.store.applyBatch(this.scope, snapshotToOps(snapshot));
     }
     this.previous = snapshot;
+    this.previousVersion = isVersioned(this.graph) ? this.graph.version() : undefined;
     this.unsubscribe = this.graph.subscribe((next) => {
-      this.applying = this.applying.then(() => this.handle(next));
+      const version = isVersioned(this.graph) ? this.graph.version() : undefined;
+      this.applying = this.applying.then(() => this.handle({ snapshot: next, version }));
     });
     return snapshot;
   }
 
-  private async handle(next: GraphSnapshot): Promise<void> {
+  private async handle(next: PendingSnapshot): Promise<void> {
     if (!this.wanted()) {
       // Nothing consumes the diff, so do not compute one. This is the whole of
       // what `projection: none` saves on a write-heavy workspace: diffing is
       // linear in graph size and ran on every change.
-      this.previous = next;
+      this.previous = next.snapshot;
+      this.previousVersion = next.version;
       return;
     }
-    const baseline = this.previous ?? { ...next, nodes: [], edges: [] };
-    const ops = diffSnapshots(baseline, next);
+    const baseline = this.previous ?? { ...next.snapshot, nodes: [], edges: [] };
+    const ops = this.opsFor(baseline, next);
     if (ops.length === 0) {
       this.clearTimer();
       this.pending = undefined;
@@ -98,6 +124,25 @@ export class Projector {
     await this.commit(ops, next);
   }
 
+  /**
+   * Ask the document what changed; walk both snapshots only if it cannot say.
+   *
+   * The fallback is not a rare path to be tolerated — it is what every
+   * unversioned backend takes, and what a versioned one takes after its history
+   * has been shallow-trimmed past the last projected version. Both have to
+   * produce the same ops, which is why `diffSince` emits them in
+   * `diffSnapshots` order.
+   */
+  private opsFor(baseline: GraphSnapshot, next: PendingSnapshot): GraphOp[] {
+    if (this.previousVersion && next.version && isVersioned(this.graph)) {
+      const ops = this.graph.diffSince(this.previousVersion, next.version);
+      if (ops !== undefined) {
+        return ops;
+      }
+    }
+    return diffSnapshots(baseline, next.snapshot);
+  }
+
   /** Discard this workspace's projected copy. Called when the workspace ends. */
   async drop(): Promise<void> {
     await this.store?.dropScope(this.scope);
@@ -110,19 +155,20 @@ export class Projector {
     if (!next) {
       return;
     }
-    const baseline = this.previous ?? { ...next, nodes: [], edges: [] };
-    const ops = diffSnapshots(baseline, next);
+    const baseline = this.previous ?? { ...next.snapshot, nodes: [], edges: [] };
+    const ops = this.opsFor(baseline, next);
     if (ops.length === 0) {
       return;
     }
     await this.commit(ops, next);
   }
 
-  private async commit(ops: GraphOp[], snapshot: GraphSnapshot): Promise<void> {
-    this.previous = snapshot;
+  private async commit(ops: GraphOp[], next: PendingSnapshot): Promise<void> {
+    this.previous = next.snapshot;
+    this.previousVersion = next.version;
     await this.store?.applyBatch(this.scope, ops);
     for (const listener of this.listeners) {
-      listener(ops, snapshot);
+      listener(ops, next.snapshot);
     }
   }
 

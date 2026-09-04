@@ -38,14 +38,24 @@ describe("connect", () => {
     ).rejects.toThrow(/memory/);
   });
 
-  it("refuses unknown collab kinds", async () => {
+  it("refuses in-process loro with the reason, not a generic rejection", async () => {
     await expect(
       connect({
         schema: yaml,
         documentId: "doc-1",
         collab: { kind: "loro" } as never,
       }),
-    ).rejects.toThrow(/Unsupported collab.kind "loro"/);
+    ).rejects.toThrow(/loro.*no transport/s);
+  });
+
+  it("refuses unknown collab kinds", async () => {
+    await expect(
+      connect({
+        schema: yaml,
+        documentId: "doc-1",
+        collab: { kind: "nonsense" } as never,
+      }),
+    ).rejects.toThrow(/Unsupported collab.kind "nonsense"/);
   });
 
   it("joins a custom backend and sees host writes", async () => {

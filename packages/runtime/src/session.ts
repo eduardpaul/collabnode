@@ -5,10 +5,13 @@ import type {
   CollabHandle,
   CollabMap,
   CollabText,
+  DocExportMode,
   Peer,
   PeerKind,
   Presence,
+  VersionToken,
 } from "@collabnode/collab";
+import { isVersioned, unsupported } from "@collabnode/collab";
 import {
   diffSnapshots,
   squash,
@@ -657,6 +660,21 @@ export class CollabSession<S extends GraphTypeMap = AnyGraph> {
     return this as unknown as CollabSession<S2>;
   }
 
+  /**
+   * A session over a handle the caller already opened.
+   *
+   * `open` is the usual door; this is for the cases where the handle does not
+   * come from an id — `CollabBackend.restore` rebuilding a finished document
+   * from its bytes, most of all, where there is no id to open and the document
+   * exists only in memory.
+   */
+  static async adopt<S extends GraphTypeMap = AnyGraph>(
+    handle: CollabHandle,
+    options: CollabSessionOptions,
+  ): Promise<CollabSession<S>> {
+    return CollabSession.connect<S>(options.schema, options, handle);
+  }
+
   private static async connect<S extends GraphTypeMap = AnyGraph>(
     schema: GraphSchema,
     options: CollabSessionOptions,
@@ -736,6 +754,45 @@ export class CollabSession<S extends GraphTypeMap = AnyGraph> {
 
   history(filter?: HistoryFilter): HistoryEntry[] {
     return this.handle.graph.history(filter);
+  }
+
+  /**
+   * This document's current version, or `undefined` on a backend that has none.
+   *
+   * `undefined` rather than a thrown error, because a version is an
+   * optimisation everywhere it is used — an artifact without one is still a
+   * complete artifact, it just reopens as a re-seed instead of a checkout.
+   */
+  version(): VersionToken | undefined {
+    return isVersioned(this.handle.graph) ? this.handle.graph.version() : undefined;
+  }
+
+  /**
+   * The whole document as bytes, history included, for a caller that wants to
+   * store it and open it again later.
+   *
+   * `shallow` drops the history that is no longer needed to keep collaborating,
+   * which makes the bytes much smaller and gives up forking versions older than
+   * the export.
+   */
+  exportDoc(mode?: DocExportMode): Uint8Array | undefined {
+    return isVersioned(this.handle.graph) ? this.handle.graph.exportDoc(mode) : undefined;
+  }
+
+  /**
+   * Move this session's document to a past version, or back to the latest with
+   * `undefined`.
+   *
+   * A rewound document is read-only, which is what makes this safe on a review
+   * mount and wrong on a live workspace: every peer sharing the document sees
+   * the rewind. Throws on a backend that cannot do it, rather than silently
+   * showing the present.
+   */
+  checkout(version: VersionToken | undefined): void {
+    if (!isVersioned(this.handle.graph)) {
+      throw unsupported(this.backendKind, "versioning");
+    }
+    this.handle.graph.checkout(version);
   }
 
   /**

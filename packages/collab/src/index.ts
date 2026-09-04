@@ -4,9 +4,12 @@ export type {
   CollabHandle,
   CollabListener,
   CollaborativeGraph,
+  DocExportMode,
   OpenOptions,
+  VersionToken,
+  VersionedGraph,
 } from "./backend.js";
-export { assertSchemaMatch, CollabError, unsupported } from "./backend.js";
+export { assertSchemaMatch, CollabError, isVersioned, unsupported } from "./backend.js";
 export type { CollabArray, CollabMap, CollabText } from "./fields.js";
 export { cloneJson, replaceText } from "./fields.js";
 export type {

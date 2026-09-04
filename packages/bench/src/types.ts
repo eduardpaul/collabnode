@@ -1,4 +1,4 @@
-export type BackendName = "memory" | "fluid" | "hocuspocus";
+export type BackendName = "memory" | "fluid" | "hocuspocus" | "loro";
 export type GraphName = "memory" | "ladybug" | "age";
 export type ScenarioName =
   | "writes"
@@ -9,7 +9,7 @@ export type ScenarioName =
   | "users"
   | "limits";
 
-export const BACKENDS: BackendName[] = ["memory", "fluid", "hocuspocus"];
+export const BACKENDS: BackendName[] = ["memory", "fluid", "hocuspocus", "loro"];
 export const GRAPHS: GraphName[] = ["memory", "ladybug", "age"];
 export const HOT_SCENARIOS: ScenarioName[] = ["writes", "concurrency", "lag", "snapshot", "join"];
 export const SCENARIOS: ScenarioName[] = [...HOT_SCENARIOS, "users", "limits"];

@@ -483,6 +483,9 @@ importers:
         specifier: workspace:*
         version: link:../schema
     devDependencies:
+      '@collabnode/loro':
+        specifier: workspace:*
+        version: link:../loro
       '@types/node':
         specifier: ^22.13.10
         version: 22.20.1
@@ -504,6 +507,31 @@ importers:
       '@ladybugdb/core':
         specifier: '>=0.11.0'
         version: 0.19.1
+    devDependencies:
+      '@types/node':
+        specifier: ^22.13.10
+        version: 22.20.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.11(@types/node@22.20.1)(jsdom@30.0.1(@noble/hashes@2.3.0))(vite@8.2.2(@types/node@22.20.1)(yaml@2.9.0))
+
+  packages/loro:
+    dependencies:
+      '@collabnode/collab':
+        specifier: workspace:*
+        version: link:../collab
+      '@collabnode/graph':
+        specifier: workspace:*
+        version: link:../graph
+      '@collabnode/schema':
+        specifier: workspace:*
+        version: link:../schema
+      loro-crdt:
+        specifier: ^1.15.1
+        version: 1.15.1
     devDependencies:
       '@types/node':
         specifier: ^22.13.10
@@ -578,6 +606,9 @@ importers:
       '@collabnode/ladybug':
         specifier: workspace:*
         version: link:../ladybug
+      '@collabnode/loro':
+        specifier: workspace:*
+        version: link:../loro
       '@collabnode/mcp':
         specifier: workspace:*
         version: link:../mcp
@@ -2785,6 +2816,9 @@ packages:
 
   long@5.3.2:
     resolution: {integrity: sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA==}
+
+  loro-crdt@1.15.1:
+    resolution: {integrity: sha512-J3568cXG75MNotTJg2XVhlIEW8POjAZRFhK+3yXYBaQVB1LHn/Ksk3DIqoTOBUf+cgE4yVeqPbh7VUTX2QLV2g==}
 
   lru-cache@11.5.2:
     resolution: {integrity: sha512-4pfM1Ff0x50o0tQwb5ucw/RzNyD0/YJME6IVcStalZuMWxdt3sR3huStTtxz4PUmvZfRguvDejasvQ2kifR11g==}
@@ -6085,6 +6119,8 @@ snapshots:
   lodash@4.18.1: {}
 
   long@5.3.2: {}
+
+  loro-crdt@1.15.1: {}
 
   lru-cache@11.5.2: {}
 
